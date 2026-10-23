@@ -201,7 +201,7 @@ def _apply_pending_model_switch(sid: str, session: dict) -> None:
     A dropped pick is a warning notice, not an ``error``: clients paint ``error`` as a failed turn
     (Desktop's red retry card under the user's message) while this turn runs normally on the old model.
     The session.info re-sync moves the pill off the pick the session never adopted."""
-    universal_id = session.pop("pending_universal_model_switch", None)
+    universal_id = session.get("pending_universal_model_switch")
     if universal_id:
         # The role was saved mid-turn. At this safe boundary use the current
         # profile, not a stale credential or catalog snapshot from the RPC.
@@ -239,6 +239,13 @@ def _apply_pending_model_switch(sid: str, session: dict) -> None:
                 raise ValueError("queued cloud model requires explicit cost confirmation")
             GatewayRunner._apply_fallback_chain_to_agent(session["agent"], fallbacks)
             session["model_override"] = override
+        # The selection is an admission boundary until its live switch has
+        # actually succeeded. If validation, confirmation or the runtime swap
+        # fails, keep it queued so the next turn cannot silently use the old
+        # potentially billable session route. Do not consume a newer pick
+        # queued concurrently while this turn was applying the previous one.
+        if session.get("pending_universal_model_switch") == universal_id:
+            session.pop("pending_universal_model_switch", None)
     pending = session.pop("pending_model_switch", None)
     if not pending or session.get("agent") is None:
         return

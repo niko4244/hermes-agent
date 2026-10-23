@@ -385,8 +385,20 @@ def _sync_agent_fallback_with_config(sid: str, session: dict) -> None:
         # not install the global (possibly paid) fallback on every turn.
         from tui_gateway.universal_model_runtime import selected_profile_main_fallbacks
         chain = selected_profile_main_fallbacks()
+        approved = list(chain or [])
         from gateway.run import GatewayRunner
-        GatewayRunner._apply_fallback_chain_to_agent(agent, chain if chain is not None else [])
+        GatewayRunner._apply_fallback_chain_to_agent(agent, approved)
+        if getattr(agent, "_fallback_activated", False):
+            # GatewayRunner deliberately leaves the chain untouched during a
+            # fallback cooldown. That is correct for the current live route,
+            # but revoked *future* hops must not remain executable this turn.
+            old_chain = list(getattr(agent, "_fallback_chain", []) or [])
+            retained = [entry for entry in old_chain if entry in approved]
+            if retained != old_chain:
+                consumed = getattr(agent, "_fallback_index", 0)
+                agent._fallback_index = sum(entry in approved for entry in old_chain[:consumed])
+                agent._fallback_chain = retained
+                agent._fallback_model = retained[0] if retained else None
         return
     try:
         from gateway.run import GatewayRunner
