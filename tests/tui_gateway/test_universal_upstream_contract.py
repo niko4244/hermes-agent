@@ -123,6 +123,45 @@ def test_queued_local_switch_is_preflighted_at_real_turn_boundary():
     assert "pending_universal_model_switch" not in session
 
 
+def test_successful_idle_replacement_discards_prior_denied_pending_pin():
+    service = Mock()
+    service.status.return_value = {"models": [LOCAL], "policy": {}}
+    service._allowed.return_value = True
+    service.assign.return_value = {
+        "role": "main", "mode": "pinned", "model_id": LOCAL["id"], "fallback_ids": [],
+    }
+    agent = SimpleNamespace(
+        model="previous", provider="openrouter", base_url="https://example.invalid/v1",
+        api_key="old", api_mode="chat_completions", _fallback_chain=[],
+        _fallback_activated=False, switch_model=Mock(),
+    )
+    session = {"agent": agent, "running": False,
+               "pending_universal_model_switch": "old-denied-id"}
+    with patch.dict(server._sessions, {"sid": session}), \
+            patch("hermes_cli.universal_models.service.ModelService", return_value=service), \
+            patch.object(server, "_apply_universal_local_switch"):
+        result = server._methods["orchestration.assign"](
+            "rid", {"session_id": "sid", "role": "main", "mode": "pinned",
+                    "model_id": LOCAL["id"]})
+    assert result["result"]["deferred"] is False
+    assert "pending_universal_model_switch" not in session
+
+
+def test_successful_auto_assignment_cancels_old_running_pin():
+    service = Mock()
+    service.assign.return_value = {
+        "role": "main", "mode": "auto", "model_id": None, "fallback_ids": [],
+    }
+    session = {"agent": Mock(), "running": True,
+               "pending_universal_model_switch": "old-denied-id"}
+    with patch.dict(server._sessions, {"sid": session}), \
+            patch("hermes_cli.universal_models.service.ModelService", return_value=service):
+        result = server._methods["orchestration.assign"](
+            "rid", {"session_id": "sid", "role": "main", "mode": "auto"})
+    assert result["result"]["mode"] == "auto"
+    assert "pending_universal_model_switch" not in session
+
+
 def test_disallowed_queued_switch_refuses_turn_without_touching_runtime():
     service = Mock()
     service.profile.return_value = {

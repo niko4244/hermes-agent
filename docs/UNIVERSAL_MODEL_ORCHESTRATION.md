@@ -96,6 +96,12 @@ identities. Native Ollama pins use a directly observed loopback endpoint and a
 harmless `local` API-key sentinel; they never inherit ambient cloud keys. A
 running session queues its selected pin for the next safe turn boundary; idle
 sessions switch through the real agent runtime, not a simulated request.
+Pending main-role switches remain blocking admission requests until their
+runtime transition succeeds. A rejected or removed pin cannot silently fall
+back to the old provider on a later turn; a subsequently confirmed idle
+replacement (or deliberate automatic selection) clears that stale pending
+request. Approved fallback changes also remove revoked future hops during an
+already active provider's cooldown.
 Configured cloud providers use Hermes' existing credential and model-switch
 resolvers. Remote primary or fallback assignments, including proxied localhost
 models and saved delegated roles, require explicit `confirm_cloud=true`

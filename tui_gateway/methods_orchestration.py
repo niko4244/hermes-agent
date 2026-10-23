@@ -98,8 +98,19 @@ def _(rid, params: dict) -> dict:
         # and could execute later without another interaction.
         selected_ids = ([selected_id] if mode == "pinned" else []) + (fallbacks or [])
         if selected_ids:
-            all_rows = {row.get("id"): row for row in service.status(refresh=False).get("models", [])
+            state = service.status(refresh=False)
+            all_rows = {row.get("id"): row for row in state.get("models", [])
                         if isinstance(row, dict)}
+            restrictions = state.get("policy") or {}
+            if (restrictions.get("local_only")
+                    or any(name in restrictions for name in (
+                        "max_input_cost_per_million", "max_output_cost_per_million"))):
+                if any(
+                    (row := all_rows.get(model_id)) is not None
+                    and not service._allowed(row, restrictions, frozenset(), None)
+                    for model_id in selected_ids
+                ):
+                    return _err(rid, 4004, "selected model or fallback is excluded by the active routing policy")
             needs_consent = any(
                 (row := all_rows.get(model_id)) is not None
                 and row.get("source") not in {"ollama-live", "local-gguf", "local-hf", "ollama-manifest"}
@@ -217,6 +228,15 @@ def _(rid, params: dict) -> dict:
                 elif live_session.get("agent") is None:
                     # A deferred build must use the newly persisted profile.
                     live_session.pop("model_override", None)
+        # A previously denied pin remains queued as a fail-closed admission
+        # barrier until the user makes a successful replacement selection.
+        # That replacement must supersede the old pending ID; otherwise a
+        # newly accepted idle switch is spuriously refused next turn.
+        if role == "main" and live_session is not None and (
+            mode == "auto"
+            or not live_session.get("running")
+        ):
+            live_session.pop("pending_universal_model_switch", None)
         return _ok(rid, assigned)
     except (ValueError, TypeError, OSError, KeyError) as exc:
         # Avoid reflecting config secrets or credentialed URLs in RPC errors.
