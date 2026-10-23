@@ -225,6 +225,15 @@ describe('createSlashHandler', () => {
     expect(ctx.gateway.rpc).not.toHaveBeenCalled()
   })
 
+  it('opens the native model orchestration panel without touching /model or sending RPCs', () => {
+    const ctx = buildCtx()
+
+    expect(createSlashHandler(ctx)('/orchestrate')).toBe(true)
+    expect(getOverlayState().orchestration).toBe(true)
+    expect(getOverlayState().modelPicker).toBe(false)
+    expect(ctx.gateway.rpc).not.toHaveBeenCalled()
+  })
+
   it('honors TUI picker session scope without adding --global', async () => {
     patchUiState({ sid: 'sid-abc' })
 

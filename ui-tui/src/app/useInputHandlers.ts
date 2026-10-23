@@ -308,6 +308,10 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       return patchOverlayState({ modelPicker: false })
     }
 
+    if (overlay.orchestration) {
+      return patchOverlayState({ orchestration: false })
+    }
+
     if (overlay.petPicker) {
       return patchOverlayState({ petPicker: false })
     }

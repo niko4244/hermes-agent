@@ -14,6 +14,7 @@ import { ConnectionSetupOverlay } from './connectionSetupOverlay.js'
 import { ConnectorsOverlay } from './connectorsOverlay.js'
 import { SecretPrompt, SudoPrompt, VaultCodePrompt, VaultSaveLoginPrompt, VaultUnlockPrompt } from './maskedPrompt.js'
 import { ModelPicker } from './modelPicker.js'
+import { OrchestrationOverlay } from './orchestrationOverlay.js'
 import { OverlayHint } from './overlayControls.js'
 import { listRowStyle } from './overlayPrimitives.js'
 import { PetPicker } from './petPicker.js'
@@ -311,6 +312,23 @@ export function FloatingOverlays({
             maxWidth={width}
             onCancel={() => patchOverlayState({ modelPicker: false })}
             onSelect={onModelSelect}
+            sessionId={sid}
+            t={theme}
+          />
+        </FloatBox>
+      )
+    })
+  }
+
+  if (overlay.orchestration) {
+    widgets.push({
+      id: 'orchestration',
+      render: width => (
+        <FloatBox color={theme.color.border}>
+          <OrchestrationOverlay
+            gw={gw}
+            maxWidth={width}
+            onClose={() => patchOverlayState({ orchestration: false })}
             sessionId={sid}
             t={theme}
           />
