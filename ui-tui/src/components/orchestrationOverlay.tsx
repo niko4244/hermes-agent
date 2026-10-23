@@ -54,6 +54,7 @@ type Stage =
   | 'create-role'
   | 'cap-input'
   | 'policy-confirm'
+  | 'cloud-confirm'
   | 'qualify-confirm'
 const TABS: readonly Stage[] = ['roles', 'models', 'profiles', 'policy']
 const POLICY_FIELDS = ['local_only', 'max_input_cost_per_million', 'max_output_cost_per_million'] as const
@@ -93,6 +94,13 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
   const [policyIdx, setPolicyIdx] = useState(0)
   const [draftCap, setDraftCap] = useState('')
   const [pendingPolicy, setPendingPolicy] = useState<OrchestrationPolicy | null>(null)
+  const [pendingCloud, setPendingCloud] = useState<{
+    mode: 'auto' | 'pinned'
+    modelId?: string | null
+    fallbackIds?: string[]
+    onSaved?: () => void
+    from: Stage
+  } | null>(null)
   const [qualifyTarget, setQualifyTarget] = useState<OrchestrationModel | null>(null)
   const [qualifyTokens, setQualifyTokens] = useState(32)
   const [qualifyTimeout, setQualifyTimeout] = useState(20)
@@ -238,9 +246,23 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
       return
     }
 
+    const assignment = buildOrchestrationAssignment(activeRole, mode, modelId, fallbackIds, sessionId)
+    // A remote configured name or localhost proxy can incur cloud charges.
+    // Get a deliberate keyboard confirmation before persisting a deferred
+    // main/delegation route (which may execute much later without a prompt).
+    const selectedIds = [...(assignment.model_id ? [assignment.model_id] : []), ...assignment.fallback_ids]
+    if (selectedIds.some(id => {
+      const row = allModels.find(model => model.id === id)
+      return row && !isDirectLocalModel(row)
+    })) {
+      setPendingCloud({ mode, modelId, fallbackIds, onSaved, from: stage })
+      setError('')
+      setStage('cloud-confirm')
+      return
+    }
     mutate(
       'orchestration.assign',
-      buildOrchestrationAssignment(activeRole, mode, modelId, fallbackIds, sessionId),
+      assignment,
       `${activeRole.role}: ${mode === 'auto' ? 'automatic' : selectedModelName(modelId)}`,
       onSaved
     )
@@ -354,6 +376,12 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
       return
     }
 
+    if (stage === 'cloud-confirm') {
+      setStage(pendingCloud?.from ?? 'roles')
+      setPendingCloud(null)
+      return
+    }
+
     if (stage === 'models' || stage === 'fallbacks') {
       setStage('roles')
       setQuery('')
@@ -367,6 +395,25 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
 
   useInput((ch, key) => {
     if (busy) {
+      return
+    }
+
+    if (stage === 'cloud-confirm') {
+      if (key.escape || ch === 'n') {
+        back()
+      } else if (ch === 'y' && pendingCloud && activeRole) {
+        mutate(
+          'orchestration.assign',
+          { ...buildOrchestrationAssignment(activeRole, pendingCloud.mode,
+              pendingCloud.modelId, pendingCloud.fallbackIds, sessionId),
+            confirm_cloud: true },
+          `${activeRole.role}: confirmed remote model assignment`,
+          () => {
+            pendingCloud.onSaved?.()
+            setPendingCloud(null)
+          }
+        )
+      }
       return
     }
 
@@ -649,7 +696,7 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
       ? 'models'
       : stage === 'save'
         ? 'profiles'
-        : stage === 'fallbacks' || stage === 'create-role'
+        : stage === 'fallbacks' || stage === 'create-role' || stage === 'cloud-confirm'
           ? 'roles'
           : stage === 'cap-input' || stage === 'policy-confirm'
             ? 'policy'
@@ -735,6 +782,17 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
           <Text color={t.color.muted}>
             Changing these limits can permit billable model routing. y save · n/Esc cancel
           </Text>
+        </Box>
+      )}
+      {stage === 'cloud-confirm' && pendingCloud && (
+        <Box flexDirection="column">
+          <Text bold color={t.color.accent}>
+            Confirm remote model or fallback assignment?
+          </Text>
+          <Text color={t.color.label}>
+            Configured providers and local proxies may call billable cloud APIs; model prices are not verified.
+          </Text>
+          <Text color={t.color.muted}>y confirm and save · n/Esc cancel without saving</Text>
         </Box>
       )}
       {stage === 'qualify-confirm' && qualifyTarget && (
@@ -883,6 +941,8 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
                     ? 'type nonnegative USD cap per 1M tokens · Enter review · Esc cancel'
                     : stage === 'policy-confirm'
                       ? 'y confirm policy write · n/Esc cancel'
+                  : stage === 'cloud-confirm'
+                    ? 'y confirm possible cloud charges · n/Esc cancel'
                       : stage === 'qualify-confirm'
                         ? 'y run local-only probe · [ ] token limit · - + timeout · n/Esc cancel'
                         : stage === 'save'

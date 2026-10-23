@@ -24981,6 +24981,11 @@
             ],
             "default": null,
             "title": "Fallback Ids"
+          },
+          "confirm_cloud": {
+            "default": false,
+            "title": "Confirm Cloud",
+            "type": "boolean"
           }
         },
         "required": [

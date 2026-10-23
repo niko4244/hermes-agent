@@ -47,10 +47,62 @@ def test_sessionless_cloud_assignment_only_saves_profile_and_never_calls_config_
     with patch("hermes_cli.universal_models.service.ModelService", return_value=service), \
             patch.object(server, "_apply_model_switch", side_effect=AssertionError("unexpected switch")), \
             patch.dict(server._methods, {"config.set": Mock(side_effect=AssertionError("global mutation"))}):
-        result = server._methods["orchestration.assign"](
+        deferred = server._methods["orchestration.assign"](
             "r", {"role": "main", "mode": "pinned", "model_id": CLOUD["id"]})
+        assert deferred["result"]["confirm_required"] is True
+        service.assign.assert_not_called()
+        result = server._methods["orchestration.assign"](
+            "r", {"role": "main", "mode": "pinned", "model_id": CLOUD["id"],
+                  "confirm_cloud": True})
     assert result["result"]["deferred"] is True
     service.assign.assert_called_once()
+
+
+@pytest.mark.parametrize("role,mode,selected,fallback_ids", [
+    ("main", "pinned", CLOUD["id"], []),
+    ("delegation.leaf", "pinned", CLOUD["id"], []),
+    ("delegation.orchestrator", "auto", None, [CLOUD["id"]]),
+    ("main", "pinned", LOCAL["id"], [CLOUD["id"]]),
+])
+def test_remote_primary_or_fallback_requires_explicit_cost_consent_before_persistence(
+    role, mode, selected, fallback_ids,
+):
+    service = Mock()
+    service.status.return_value = {"models": [LOCAL, CLOUD], "policy": {}}
+    service._allowed.return_value = True
+    with patch("hermes_cli.universal_models.service.ModelService", return_value=service):
+        response = server._methods["orchestration.assign"]("r", {
+            "role": role, "mode": mode, "model_id": selected, "fallback_ids": fallback_ids,
+        })
+    assert response["result"]["confirm_required"] is True
+    assert "charges" in response["result"]["warning"]
+    service.assign.assert_not_called()
+
+
+def test_explicit_remote_role_consent_permits_profile_only_save():
+    service = Mock()
+    service.status.return_value = {"models": [CLOUD], "policy": {}}
+    service.assign.return_value = {
+        "role": "delegation.leaf", "mode": "pinned", "model_id": CLOUD["id"],
+        "fallback_ids": [],
+    }
+    with patch("hermes_cli.universal_models.service.ModelService", return_value=service):
+        response = server._methods["orchestration.assign"]("r", {
+            "role": "delegation.leaf", "mode": "pinned",
+            "model_id": CLOUD["id"], "confirm_cloud": True,
+        })
+    assert response["result"]["model_id"] == CLOUD["id"]
+    service.assign.assert_called_once()
+
+
+def test_invalid_cloud_consent_type_fails_closed():
+    with patch("hermes_cli.universal_models.service.ModelService") as service:
+        response = server._methods["orchestration.assign"]("r", {
+            "role": "delegation.leaf", "mode": "pinned",
+            "model_id": CLOUD["id"], "confirm_cloud": "true",
+        })
+    assert response["error"]["code"] == 4002
+    service.assert_not_called()
 
 
 def test_queued_local_switch_is_preflighted_at_real_turn_boundary():

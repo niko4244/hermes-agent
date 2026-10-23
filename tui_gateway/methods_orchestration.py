@@ -87,9 +87,29 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4002, "a pinned model_id is required")
     if fallbacks is not None and (not isinstance(fallbacks, list) or any(not isinstance(i, str) for i in fallbacks)):
         return _err(rid, 4002, "fallback_ids must be model IDs")
+    if not isinstance(params.get("confirm_cloud", False), bool):
+        return _err(rid, 4002, "confirm_cloud must be a boolean")
 
     try:
         service = ModelService()
+        # A configured cloud name is not evidence of affordability or an
+        # entitlement. In particular, sessionless, busy, or non-main role
+        # assignments previously bypassed /model's live-switch price warning
+        # and could execute later without another interaction.
+        selected_ids = ([selected_id] if mode == "pinned" else []) + (fallbacks or [])
+        if selected_ids:
+            all_rows = {row.get("id"): row for row in service.status(refresh=False).get("models", [])
+                        if isinstance(row, dict)}
+            needs_consent = any(
+                (row := all_rows.get(model_id)) is not None
+                and row.get("source") not in {"ollama-live", "local-gguf", "local-hf", "ollama-manifest"}
+                for model_id in selected_ids
+            )
+            if needs_consent and params.get("confirm_cloud") is not True:
+                return _ok(rid, {
+                    "confirm_required": True,
+                    "warning": "Remote or proxied models may incur provider charges. Confirm this model and fallback assignment explicitly.",
+                })
         switch = None
         session_id = params.get("session_id")
         if session_id:

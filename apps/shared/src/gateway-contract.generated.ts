@@ -2006,6 +2006,7 @@ export interface OrchestrationAssignParams {
   mode: 'auto' | 'pinned'
   model_id?: string | null
   fallback_ids?: string[] | null
+  confirm_cloud?: boolean
 }
 export interface OrchestrationAssignResult {
   role?: string | null

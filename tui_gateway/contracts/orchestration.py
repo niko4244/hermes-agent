@@ -75,6 +75,7 @@ class OrchestrationAssignParams(OrchestrationScopeParams):
     mode: Literal["auto", "pinned"]
     model_id: str | None = None
     fallback_ids: list[str] | None = None
+    confirm_cloud: bool = False
 
 
 class OrchestrationAssignResult(OpenModel):

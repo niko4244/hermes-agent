@@ -97,7 +97,14 @@ harmless `local` API-key sentinel; they never inherit ambient cloud keys. A
 running session queues its selected pin for the next safe turn boundary; idle
 sessions switch through the real agent runtime, not a simulated request.
 Configured cloud providers use Hermes' existing credential and model-switch
-resolvers, and paid model switching still requires the host's confirmation.
+resolvers. Remote primary or fallback assignments, including proxied localhost
+models and saved delegated roles, require explicit `confirm_cloud=true`
+consent before persistence; the native TUI asks for `y` and never sends the
+confirm flag during browsing. This also covers deferred assignments that could
+otherwise execute after the interaction ends. The existing live-switch
+large-model confirmation remains an additional check, not a substitute.
+Confirmation is permission to select a potentially billable provider, **not**
+a price or entitlement verification.
 Profile-only assignments do not silently edit Hermes' global default model.
 An idle live-agent switch that succeeds before its profile write commits is
 rolled back if that write fails; if restoration also fails, the session is
@@ -151,8 +158,13 @@ The current-upstream integration is tested by
 `tests/tui_gateway/test_universal_model_routing.py`,
 `tests/tui_gateway/test_universal_upstream_contract.py`, and
 `tests/tools/test_universal_delegate_routes.py`, in addition to the registry,
-gateway-contract and native TUI tests. Real generation on the new upstream
+gateway-contract and native TUI tests. Hermetic loopback-stream tests in
+`tests/tui_gateway/test_universal_hermetic_e2e.py` and
+`tests/tui_gateway/test_universal_turn_pipeline.py` construct the real
+`AIAgent` and execute real gateway turn handling with a local test server.
+They prove the route and streaming integration, not a model's generated
+intelligence. Real model-generated inference on the new upstream still
 requires a safely usable, already-loaded local Ollama model; no generation
-should be inferred from mock tests or from listing-installed models.
+should be inferred from a stub response or listing-installed models.
 Ordinary Hermes sessions with no saved model profiles do not create a
 universal-model SQLite sidecar on their normal turn/build path.

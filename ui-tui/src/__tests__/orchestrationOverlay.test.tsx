@@ -64,7 +64,7 @@ afterEach(() => {
   inputHarness.handler = undefined
 })
 
-async function mount() {
+async function mount(initial?: OrchestrationStatus) {
   const stdout = new PassThrough()
   const stdin = new PassThrough()
   const stderr = new PassThrough()
@@ -75,7 +75,7 @@ async function mount() {
   stdout.on('data', chunk => {
     output += chunk.toString()
   })
-  let status = initialStatus()
+  let status = initial ?? initialStatus()
   const request = vi.fn(async (method: string, params: Record<string, unknown>) => {
     if (method === 'orchestration.status' || method === 'orchestration.refresh') return status
     if (method === 'orchestration.policy') {
@@ -91,6 +91,10 @@ async function mount() {
         level: 'inference-probe',
         provenance: { source: 'ollama-live', api_key: 'private-must-not-render' }
       }
+    }
+    if (method === 'orchestration.assign') {
+      return { role: params.role, mode: params.mode,
+               model_id: params.model_id, fallback_ids: params.fallback_ids }
     }
     throw new Error(`unexpected method ${method}`)
   })
@@ -138,6 +142,27 @@ async function mount() {
 }
 
 describe('/orchestrate interactive policy and local qualification', () => {
+  it('requires an explicit y before saving a potentially billable proxy assignment', async () => {
+    const ui = await mount({ ...initialStatus(), policy: { local_only: false } })
+    await ui.press('', { tab: true }) // models
+    await ui.press('', { downArrow: true }) // localhost proxy, NOT proven local inference
+    await ui.press('', { return: true }) // request cloud selection
+    expect(ui.output()).toContain('Confirm remote model or fallback assignment?')
+    expect(ui.request.mock.calls.some(([name]) => name === 'orchestration.assign')).toBe(false)
+    await ui.press('n')
+    expect(ui.request.mock.calls.some(([name]) => name === 'orchestration.assign')).toBe(false)
+    await ui.press('', { return: true })
+    await ui.press('y')
+    expect(ui.request).toHaveBeenCalledWith('orchestration.assign', {
+      role: 'main',
+      mode: 'pinned',
+      model_id: proxy.id,
+      fallback_ids: [],
+      session_id: 'sess',
+      confirm_cloud: true
+    })
+  })
+
   it('never probes during browsing; requires explicit confirm and shows provenance', async () => {
     const ui = await mount()
     expect(ui.output()).toContain('local only ON')
