@@ -9,7 +9,6 @@ import pytest
 
 from hermes_cli.universal_models.service import ModelService
 from tui_gateway import server
-from tui_gateway.universal_model_runtime import main_model_override
 
 
 @pytest.fixture
@@ -104,7 +103,10 @@ def test_registry_rpc_to_real_agent_reply_with_no_cloud_fallback(tmp_path, monke
 
     cfg = {"model": {"provider": "openrouter", "default": "should-never-run"},
            "agent": {"max_turns": 1}}
-    with patch.object(server, "_load_cfg", return_value=cfg), \
+    live_session = {"running": False, "session_key": "hermetic-key",
+                    "profile_home": str(tmp_path)}
+    with patch.dict(server._sessions, {"hermetic-sid": live_session}), \
+            patch.object(server, "_load_cfg", return_value=cfg), \
             patch.object(server, "_get_db", return_value=None), \
             patch.object(server, "_load_enabled_toolsets", return_value=[]), \
             patch.object(server, "_load_disabled_toolsets", return_value=[]), \
@@ -113,7 +115,7 @@ def test_registry_rpc_to_real_agent_reply_with_no_cloud_fallback(tmp_path, monke
             patch.object(server, "_resolve_runtime_with_fallback",
                          side_effect=AssertionError("cloud provider resolver invoked")):
         agent = server._make_agent("hermetic-sid", "hermetic-key",
-                                   model_override=main_model_override(local))
+                                   model_override=None)
         try:
             reply = agent.chat("Reply with one word.")
         finally:
@@ -123,6 +125,7 @@ def test_registry_rpc_to_real_agent_reply_with_no_cloud_fallback(tmp_path, monke
     assert len(sent) == 1
     assert sent[0]["model"] == expected_model
     assert sent[0]["stream"] is True
+    assert live_session["model_override"]["_universal_model_id"] == local["id"]
     assert agent.provider == "custom"
     assert agent._fallback_chain == []
 
