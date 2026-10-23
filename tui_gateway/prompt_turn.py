@@ -691,6 +691,10 @@ def _prepare_turn_input(sid: str, session: dict, st: _TurnRun, text: Any, images
         _sync_agent_compression_with_config(sid, session)
     _sync_agent_fallback_with_config(sid, session)  # chain added after the chat opened reaches this turn
     _sync_bot_capabilities(sid, session)  # Bot Chat: adopt Settings->Capabilities edits
+    # Last authorization boundary: policies may have changed since this
+    # agent was constructed, and both config syncs above can alter its route.
+    from tui_gateway.universal_model_runtime import enforce_main_turn_policy
+    enforce_main_turn_policy(session["agent"], session)
     _adopt_out_of_band_turns(session)
     st.agent = agent = session["agent"]
     # Snapshot after the model sync: a deferred switch's history mutation belongs to this turn.

@@ -79,7 +79,12 @@ interface OrchestrationOverlayProps {
 /** The backend owns persistence and routing; this panel is a view of its confirmed state. */
 export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: OrchestrationOverlayProps) {
   const requestOrchestration = <M extends OrchestrationRpcName>(method: M, params: RpcMethods[M]['params']) =>
-    gw.request<RpcMethods[M]['result']>(method, params as Record<string, unknown>)
+    // All six calls must read the selected conversation's profile scope. A
+    // pooled Desktop gateway may serve several distinct homes at once.
+    gw.request<RpcMethods[M]['result']>(
+      method,
+      { ...(params as Record<string, unknown>), ...(sessionId ? { session_id: sessionId } : {}) }
+    )
   const [data, setData] = useState<OrchestrationStatus | null>(null)
   const [stage, setStage] = useState<Stage>('roles')
   const [roleIdx, setRoleIdx] = useState(0)

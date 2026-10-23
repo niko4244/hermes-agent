@@ -201,6 +201,44 @@ def _apply_pending_model_switch(sid: str, session: dict) -> None:
     A dropped pick is a warning notice, not an ``error``: clients paint ``error`` as a failed turn
     (Desktop's red retry card under the user's message) while this turn runs normally on the old model.
     The session.info re-sync moves the pill off the pick the session never adopted."""
+    universal_id = session.pop("pending_universal_model_switch", None)
+    if universal_id:
+        # The role was saved mid-turn. At this safe boundary use the current
+        # profile, not a stale credential or catalog snapshot from the RPC.
+        from hermes_cli.universal_models.service import ModelService
+        from tui_gateway.universal_model_runtime import (
+            approved_main_fallbacks_for_ids, main_model_override,
+        )
+        from gateway.run import GatewayRunner
+
+        service = ModelService()
+        state = service.status()
+        profile = service.profile("export")
+        role = next((r for r in profile.get("roles", []) if r.get("role") == "main"), None)
+        if not role or role.get("mode") != "pinned" or role.get("model_id") != universal_id:
+            raise ValueError("queued model no longer matches the active profile")
+        record = next((m for m in state.get("models", []) if m.get("id") == universal_id), None)
+        if not record or not service._allowed(record, profile.get("policy") or {}, frozenset(), None):
+            raise ValueError("queued model is no longer available under the active policy")
+        fallbacks = approved_main_fallbacks_for_ids(service, role.get("fallback_ids") or [], state=state)
+        override = main_model_override(record)
+        if not session.get("agent"):
+            session["model_override"] = override
+        elif override.get("_universal_local"):
+            _apply_universal_local_switch(sid, session, record, approved_fallbacks=fallbacks)
+        else:
+            try:
+                result = _apply_model_switch(
+                    sid, session, f'{record["model"]} --provider {record["provider"]} --session',
+                    persist_override=False)
+            except Exception:
+                # Provider error messages may embed credential-bearing URLs.
+                # Turn refusal is user-visible, so do not forward raw errors.
+                raise ValueError("queued model switch failed provider validation") from None
+            if result.get("confirm_required"):
+                raise ValueError("queued cloud model requires explicit cost confirmation")
+            GatewayRunner._apply_fallback_chain_to_agent(session["agent"], fallbacks)
+            session["model_override"] = override
     pending = session.pop("pending_model_switch", None)
     if not pending or session.get("agent") is None:
         return

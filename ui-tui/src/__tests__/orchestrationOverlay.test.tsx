@@ -141,7 +141,7 @@ describe('/orchestrate interactive policy and local qualification', () => {
   it('never probes during browsing; requires explicit confirm and shows provenance', async () => {
     const ui = await mount()
     expect(ui.output()).toContain('local only ON')
-    expect(ui.request).toHaveBeenCalledWith('orchestration.status', {})
+    expect(ui.request).toHaveBeenCalledWith('orchestration.status', { session_id: 'sess' })
     await ui.press('', { tab: true }) // roles → models
     expect(ui.output()).toContain('inference not verified')
     expect(ui.request.mock.calls.some(([name]) => name === 'orchestration.qualify')).toBe(false)
@@ -154,7 +154,8 @@ describe('/orchestrate interactive policy and local qualification', () => {
     expect(ui.request).toHaveBeenCalledWith('orchestration.qualify', {
       model_id: local.id,
       max_tokens: 16,
-      timeout_seconds: 30
+      timeout_seconds: 30,
+      session_id: 'sess'
     })
     expect(ui.output()).toContain('inference executed')
     expect(ui.output()).toContain('source: ollama-live')
@@ -188,6 +189,7 @@ describe('/orchestrate interactive policy and local qualification', () => {
     await ui.press('y') // apply
     expect(ui.request).toHaveBeenCalledWith('orchestration.policy', {
       action: 'set',
+      session_id: 'sess',
       policy: { local_only: false, max_input_cost_per_million: 1.5, max_output_cost_per_million: 3 }
     })
 
@@ -201,6 +203,7 @@ describe('/orchestrate interactive policy and local qualification', () => {
     await ui.press('y')
     expect(ui.request).toHaveBeenCalledWith('orchestration.policy', {
       action: 'set',
+      session_id: 'sess',
       policy: { local_only: false, max_input_cost_per_million: 0, max_output_cost_per_million: 3 }
     })
   })

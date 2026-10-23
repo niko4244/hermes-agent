@@ -110,6 +110,13 @@ def _deferred_build_agent_kwargs(current: dict, session_db) -> dict:
     else:
         if override := current.get("model_override"):
             kw["model_override"] = override
+        else:
+            # The profile is read only within _bind_build_profile_scopes(),
+            # so secondary Desktop homes cannot inherit a launch-home pin.
+            from tui_gateway.universal_model_runtime import selected_profile_main_override
+            if selected := selected_profile_main_override():
+                kw["model_override"] = selected
+                current["model_override"] = selected
         kw.update({k: v for k, v in (("reasoning_config_override", current.get("create_reasoning_override")),
                                      ("service_tier_override", current.get("create_service_tier_override")))
                    if v is not None})

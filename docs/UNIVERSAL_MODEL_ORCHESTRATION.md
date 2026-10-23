@@ -60,3 +60,70 @@ certify general model quality or tool-use capability.
 
 Verification: `scripts/run_tests.sh tests/universal_models -j 4 -q` and
 `python -m ruff check hermes_cli/universal_models tests/universal_models`.
+
+## Current-upstream TUI and execution integration
+
+Open `/orchestrate` in the native Hermes TUI to inspect discovered models,
+save profile-specific role assignments and ordered fallbacks, set a local-only
+restriction or per-million-token price caps, and request a bounded local
+qualification. Qualifying a model is **never implicit** in refresh or browsing;
+the user must confirm inference, and a model not already present in native
+Ollama `/api/ps` is refused without loading it. The regular `/model` picker
+continues to work independently.
+
+All six `orchestration.*` JSON-RPC methods are declared in
+`tui_gateway/contracts/orchestration.py`, generated into the shared TS/OpenRPC
+contract, and carry the active `session_id` when opened from a live conversation.
+The gateway binds that session's profile home and secret scope before every
+model-registry operation. Sessions without an identifier edit only the current
+profile; selecting an inactive or unknown session is refused.
+
+Main-agent saved assignments are consulted on current-upstream deferred/eager
+agent construction, after explicit session picks and resumable runtime
+identities. Native Ollama pins use a directly observed loopback endpoint and a
+harmless `local` API-key sentinel; they never inherit ambient cloud keys. A
+running session queues its selected pin for the next safe turn boundary; idle
+sessions switch through the real agent runtime, not a simulated request.
+Configured cloud providers use Hermes' existing credential and model-switch
+resolvers, and paid model switching still requires the host's confirmation.
+Profile-only assignments do not silently edit Hermes' global default model.
+
+At each TUI inference turn, the active profile's policy is checked **after**
+the normal model/fallback synchronization and **before** any LLM request.
+Activating another profile with a different main model invalidates an older
+session's universal pin: that session refuses subsequent inference until its
+model is explicitly switched or a new session is built under the new profile.
+When local-only is active, the runtime must match a native Ollama selection or
+an explicitly permitted native Ollama fallback. A pinned local agent has zero
+cloud fallbacks unless the operator explicitly configures policy-approved
+fallbacks. Invalid or unverified prices fail closed under a price cap; turning
+the restriction off leaves unconfigured legacy sessions alone. Refused turns
+still release their session's running state.
+
+For delegated children, the upstream `TaskRoute` / `DelegationProvider` path
+retains explicitly selected per-task providers, models, and cross-profile
+routes. Otherwise an explicitly saved `delegation.orchestrator` or
+`delegation.leaf` model is chosen from the child's **actual depth-derived
+capability**, never from an untrusted display role. An unassigned role leaves
+the normal delegation provider unchanged. Explicit local-only restrictions
+also guard provider-owned child routes and inherited fallback chains.
+
+### Scope and verification limits
+
+This port covers the native TUI, its hosted Desktop gateway sessions, and the
+supported `delegate_task` child-construction path. It does **not** yet promise
+uniform enforcement for all CLI, cron, standalone messaging-gateway, hosted
+agent or arbitrary custom role entrypoints. It does not verify account
+entitlements or quotas, perform unapproved paid-cloud inference, measure all
+GPU/VRAM configurations, or implement global monetary usage accounting.
+Configured cloud names remain **configured**, not confirmed accessible.
+
+The current-upstream integration is tested by
+`tests/tui_gateway/test_universal_model_routing.py`,
+`tests/tui_gateway/test_universal_upstream_contract.py`, and
+`tests/tools/test_universal_delegate_routes.py`, in addition to the registry,
+gateway-contract and native TUI tests. Real generation on the new upstream
+requires a safely usable, already-loaded local Ollama model; no generation
+should be inferred from mock tests or from listing-installed models.
+Ordinary Hermes sessions with no saved model profiles do not create a
+universal-model SQLite sidecar on their normal turn/build path.

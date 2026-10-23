@@ -542,6 +542,24 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
     runtime) wins over global config/env. Older rows stored the resolved provider "custom" (no named entry
     matches) — recover the identity from the persisted base_url or the rebuild fails "No LLM provider
     configured". Persisted base_url/api_key/api_mode are honored only for the original runtime, never a fallback."""
+    if isinstance(model_override, dict) and model_override.get("_universal_local") is True:
+        # A registry-verified native Ollama selection must not enter Hermes's
+        # credentialed provider resolver (or its potentially paid auth fallback).
+        # Recheck the live identity rather than trusting a caller-supplied flag.
+        from hermes_cli.universal_models.service import ModelService
+        from tui_gateway.universal_model_runtime import main_model_override
+
+        selected = next((row for row in ModelService().status()["models"]
+                         if row.get("source") == "ollama-live"
+                         and row.get("model") == model_override.get("model")
+                         and row.get("endpoint") == model_override.get("base_url")), None)
+        if selected is None or main_model_override(selected) != model_override:
+            raise ValueError("native Ollama selection is no longer verified")
+        return selected["model"], {
+            "provider": "custom", "requested_provider": "custom",
+            "base_url": selected["endpoint"], "api_key": "local",
+            "api_mode": "chat_completions",
+        }
     if isinstance(model_override, dict) and model_override.get("model"):
         model = str(model_override.get("model") or "")
         requested_provider = model_override.get("provider") or provider_override or None
@@ -565,6 +583,9 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
         resolve_kwargs = {"requested": requested_provider, "target_model": model or None}
         overrides = {}
     resolution = _resolve_runtime_with_fallback(resolve_kwargs)
+    if (isinstance(model_override, dict) and model_override.get("_universal_selection")
+            and resolution.used_fallback):
+        raise ValueError("saved model selection has no authorized provider runtime")
     if resolution.used_fallback:
         if not resolution.selected_model:
             raise RuntimeError("Auth fallback resolved without a model")
@@ -645,13 +666,28 @@ def _make_agent(
     from agent.shell_hooks import register_from_config
     register_from_config(cfg)
     system_prompt = _startup_system_prompt(cfg, session_id or key)
+    with _sessions_lock:
+        session = _sessions.get(sid)
+    if (model_override is None and provider_override is None and isinstance(session, dict)
+            and not session.get("model_override") and not session.get("resume_session_id")
+            and not session.get("resume_runtime_overrides") and session_id is None):
+        # Eager newly created sessions use the same saved main-role selection
+        # as first-prompt deferred builds. Explicit picks and resume identities
+        # must not be replaced by the profile.
+        from tui_gateway.universal_model_runtime import selected_profile_main_override
+        if selected := selected_profile_main_override():
+            model_override = selected
+            session["model_override"] = selected
     model, runtime = _resolve_agent_model_runtime(model_override, provider_override)
     fallback_notice = runtime.pop("_fallback_notice", None)
     _pr = _load_provider_routing()
     platform = _resolve_agent_platform(platform_override)
     ignore_rules = is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
-    with _sessions_lock:
-        session = _sessions.get(sid)
+    from tui_gateway.universal_model_runtime import selected_profile_main_fallbacks
+    # Session pins and /model picks retain their runtime. Only a universal
+    # selection owns the universal fallback chain; never inherit paid defaults.
+    universal_fallbacks = (selected_profile_main_fallbacks()
+                           if isinstance(model_override, dict) and model_override.get("_universal_selection") else None)
     agent = AIAgent(
         model=model, max_iterations=_cfg_max_turns(cfg, 500), provider=runtime.get("provider"),
         requested_provider=runtime.get("requested_provider"),
@@ -676,7 +712,8 @@ def _make_agent(
         session_db=session_db if session_db is not None else _get_db(), ephemeral_system_prompt=system_prompt or None,
         checkpoints_enabled=_resolve_checkpoints_enabled(cfg),
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
-        skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
+        skip_context_files=ignore_rules, skip_memory=ignore_rules,
+        fallback_model=_load_fallback_model() if universal_fallbacks is None else universal_fallbacks,
         # The resolved provider's request body (a custom entry's extra_body), as the CLI/cron/gateway pass it.
         request_overrides=runtime.get("request_overrides"),
         prefill_messages=_load_prefill_messages() or None, **_agent_cbs(sid))

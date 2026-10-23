@@ -380,6 +380,14 @@ def _sync_agent_fallback_with_config(sid: str, session: dict) -> None:
     agent = session.get("agent")
     if agent is None:
         return
+    if isinstance(session.get("model_override"), dict) and session["model_override"].get("_universal_selection"):
+        # A pinned Ollama session's explicit empty chain is meaningful: do
+        # not install the global (possibly paid) fallback on every turn.
+        from tui_gateway.universal_model_runtime import selected_profile_main_fallbacks
+        chain = selected_profile_main_fallbacks()
+        from gateway.run import GatewayRunner
+        GatewayRunner._apply_fallback_chain_to_agent(agent, chain if chain is not None else [])
+        return
     try:
         from gateway.run import GatewayRunner
         from hermes_cli.config_effective import load_user_config_effective

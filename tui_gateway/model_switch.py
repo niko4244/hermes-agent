@@ -305,6 +305,36 @@ def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: 
         session.pop("one_turn_model_restore", None)
 
 
+def _apply_universal_local_switch(sid: str, session: dict, record: dict, *, approved_fallbacks=None) -> None:
+    """Atomically switch a live session to a registry-verified native Ollama route.
+
+    This bypasses the paid provider resolver, *not* Hermes' actual AIAgent.
+    On failure the registry caller must not save the assignment.
+    """
+    from tui_gateway.universal_model_runtime import main_model_override, selected_profile_main_fallbacks
+    from gateway.run import GatewayRunner
+
+    override = main_model_override(record)
+    if not override.get("_universal_local"):
+        raise ValueError("unverified native Ollama route")
+    fallbacks = selected_profile_main_fallbacks() if approved_fallbacks is None else approved_fallbacks
+    agent = session.get("agent")
+    if agent is None:
+        raise ValueError("session agent not constructed")
+    # AIAgent.switch_model itself snapshots and rolls back on failure.
+    agent.switch_model(
+        new_model=override["model"], new_provider="custom",
+        api_key="local", base_url=override["base_url"], api_mode="chat_completions",
+    )
+    GatewayRunner._apply_fallback_chain_to_agent(agent, fallbacks if fallbacks is not None else [])
+    session["model_override"] = override
+    session.pop("one_turn_model_restore", None)
+    _restart_slash_worker(sid, session)
+    _persist_live_session_runtime(session)
+    _append_model_switch_marker(session, model=override["model"], provider="custom")
+    _emit_session_info(sid, session)
+
+
 LARGE_MODEL_NOTICE_KEY = "model.large_notice"
 
 
@@ -461,6 +491,10 @@ def _sync_agent_model_with_config(sid: str, session: dict) -> None:
     pinned with /model keep their choice; a failed switch keeps the current model."""
     agent = session.get("agent")
     if agent is None:
+        return
+    if isinstance(session.get("model_override"), dict) and session["model_override"].get("_universal_selection"):
+        # A persisted role pin is an explicit user preference; config.yaml
+        # adoption must not silently replace it with a paid cloud model.
         return
     target = _config_model_target()
     if not target[0]:

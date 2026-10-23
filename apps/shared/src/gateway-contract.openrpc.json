@@ -2041,6 +2041,114 @@
       }
     },
     {
+      "name": "orchestration.assign",
+      "summary": "Persist a role model assignment, safely switching the active main session when provided.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/OrchestrationAssignParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OrchestrationAssignResult"
+        }
+      }
+    },
+    {
+      "name": "orchestration.policy",
+      "summary": "Read or atomically replace the active profile's local-only and price controls.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/OrchestrationPolicyParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OrchestrationPolicyResult"
+        }
+      }
+    },
+    {
+      "name": "orchestration.profile",
+      "summary": "Save, select, import, export or list non-secret agent routing profiles.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/OrchestrationProfileParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OrchestrationProfileResult"
+        }
+      }
+    },
+    {
+      "name": "orchestration.qualify",
+      "summary": "Explicit, bounded inference qualification on an already loaded native Ollama model.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/OrchestrationQualifyParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OrchestrationQualifyResult"
+        }
+      }
+    },
+    {
+      "name": "orchestration.refresh",
+      "summary": "Explicitly refresh approved local endpoint model inventory.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/OrchestrationScopeParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OrchestrationStatusResult"
+        }
+      }
+    },
+    {
+      "name": "orchestration.status",
+      "summary": "Read normalized model inventory and the active per-agent routing profile.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/OrchestrationStatusParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OrchestrationStatusResult"
+        }
+      }
+    },
+    {
       "name": "paste.collapse",
       "summary": "Spill a large paste to a file and hand back the inline placeholder.",
       "params": [
@@ -24806,6 +24914,873 @@
           }
         },
         "title": "OptionalProjectResult",
+        "type": "object"
+      },
+      "OrchestrationAssignParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Id"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "auto",
+              "pinned"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model Id"
+          },
+          "fallback_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Fallback Ids"
+          }
+        },
+        "required": [
+          "role",
+          "mode"
+        ],
+        "title": "OrchestrationAssignParams",
+        "type": "object"
+      },
+      "OrchestrationAssignResult": {
+        "additionalProperties": true,
+        "properties": {
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Role"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mode"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model Id"
+          },
+          "fallback_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Fallback Ids"
+          },
+          "deferred": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Deferred"
+          },
+          "warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Warning"
+          },
+          "confirm_required": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Confirm Required"
+          }
+        },
+        "title": "OrchestrationAssignResult",
+        "type": "object"
+      },
+      "OrchestrationModel": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "display_name": {
+            "default": "",
+            "title": "Display Name",
+            "type": "string"
+          },
+          "source": {
+            "default": "",
+            "title": "Source",
+            "type": "string"
+          },
+          "availability": {
+            "title": "Availability",
+            "type": "string"
+          },
+          "capabilities": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            ],
+            "title": "Capabilities"
+          },
+          "context_window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Context Window"
+          },
+          "endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Endpoint"
+          }
+        },
+        "required": [
+          "id",
+          "provider",
+          "model",
+          "availability"
+        ],
+        "title": "OrchestrationModel",
+        "type": "object"
+      },
+      "OrchestrationPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "local_only": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Local Only"
+          },
+          "max_input_cost_per_million": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Input Cost Per Million"
+          },
+          "max_output_cost_per_million": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Output Cost Per Million"
+          }
+        },
+        "title": "OrchestrationPolicy",
+        "type": "object"
+      },
+      "OrchestrationPolicyParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Id"
+          },
+          "action": {
+            "default": "get",
+            "enum": [
+              "get",
+              "set"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OrchestrationPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "title": "OrchestrationPolicyParams",
+        "type": "object"
+      },
+      "OrchestrationPolicyResult": {
+        "additionalProperties": false,
+        "properties": {
+          "active_profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Active Profile"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/OrchestrationPolicy"
+          }
+        },
+        "required": [
+          "policy"
+        ],
+        "title": "OrchestrationPolicyResult",
+        "type": "object"
+      },
+      "OrchestrationProfileParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Id"
+          },
+          "action": {
+            "enum": [
+              "activate",
+              "save",
+              "import",
+              "export",
+              "list",
+              "delete"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Name"
+          },
+          "data": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Data"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "OrchestrationProfileParams",
+        "type": "object"
+      },
+      "OrchestrationProfileResult": {
+        "additionalProperties": true,
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Name"
+          },
+          "roles": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/OrchestrationRole"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Roles"
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OrchestrationPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "profiles": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/OrchestrationProfileRow"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profiles"
+          },
+          "active_profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Active Profile"
+          },
+          "deleted": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Deleted"
+          }
+        },
+        "title": "OrchestrationProfileResult",
+        "type": "object"
+      },
+      "OrchestrationProfileRow": {
+        "additionalProperties": true,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Active"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "OrchestrationProfileRow",
+        "type": "object"
+      },
+      "OrchestrationQualifyParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Id"
+          },
+          "model_id": {
+            "title": "Model Id",
+            "type": "string"
+          },
+          "max_tokens": {
+            "default": 16,
+            "title": "Max Tokens",
+            "type": "integer"
+          },
+          "timeout_seconds": {
+            "default": 15,
+            "title": "Timeout Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "model_id"
+        ],
+        "title": "OrchestrationQualifyParams",
+        "type": "object"
+      },
+      "OrchestrationQualifyResult": {
+        "additionalProperties": true,
+        "properties": {
+          "model_id": {
+            "title": "Model Id",
+            "type": "string"
+          },
+          "available": {
+            "default": false,
+            "title": "Available",
+            "type": "boolean"
+          },
+          "status": {
+            "default": "",
+            "title": "Status",
+            "type": "string"
+          },
+          "inference_tested": {
+            "default": false,
+            "title": "Inference Tested",
+            "type": "boolean"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reason"
+          },
+          "level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Level"
+          },
+          "metrics": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Metrics"
+          },
+          "provenance": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Provenance"
+          },
+          "quality": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Quality"
+          },
+          "settings": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Settings"
+          },
+          "timestamp": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Timestamp"
+          }
+        },
+        "required": [
+          "model_id"
+        ],
+        "title": "OrchestrationQualifyResult",
+        "type": "object"
+      },
+      "OrchestrationRole": {
+        "additionalProperties": false,
+        "properties": {
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "mode": {
+            "default": "auto",
+            "title": "Mode",
+            "type": "string"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model Id"
+          },
+          "fallback_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Fallback Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "title": "OrchestrationRole",
+        "type": "object"
+      },
+      "OrchestrationScopeParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Id"
+          }
+        },
+        "title": "OrchestrationScopeParams",
+        "type": "object"
+      },
+      "OrchestrationStatusParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Id"
+          },
+          "refresh": {
+            "default": false,
+            "title": "Refresh",
+            "type": "boolean"
+          }
+        },
+        "title": "OrchestrationStatusParams",
+        "type": "object"
+      },
+      "OrchestrationStatusResult": {
+        "additionalProperties": false,
+        "properties": {
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/OrchestrationModel"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "roles": {
+            "items": {
+              "$ref": "#/components/schemas/OrchestrationRole"
+            },
+            "title": "Roles",
+            "type": "array"
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/OrchestrationProfileRow"
+            },
+            "title": "Profiles",
+            "type": "array"
+          },
+          "active_profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Active Profile"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/OrchestrationPolicy"
+          },
+          "local_only": {
+            "default": false,
+            "title": "Local Only",
+            "type": "boolean"
+          },
+          "aliases": {
+            "items": {},
+            "title": "Aliases",
+            "type": "array"
+          },
+          "hardware": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Hardware"
+          }
+        },
+        "required": [
+          "models",
+          "roles",
+          "profiles"
+        ],
+        "title": "OrchestrationStatusResult",
         "type": "object"
       },
       "PaneRevealPayload": {

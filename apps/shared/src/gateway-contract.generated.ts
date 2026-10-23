@@ -1952,6 +1952,118 @@ export interface MachineInfo {
   wsl?: boolean | null
   container?: boolean | null
 }
+export interface OrchestrationStatusParams {
+  profile?: string | null
+  session_id?: string | null
+  refresh?: boolean
+}
+export interface OrchestrationStatusResult {
+  models: OrchestrationModel[]
+  roles: OrchestrationRole[]
+  profiles: OrchestrationProfileRow[]
+  active_profile?: string | null
+  policy?: OrchestrationPolicy
+  local_only?: boolean
+  aliases?: unknown[]
+  hardware?: unknown | null
+}
+export interface OrchestrationModel {
+  id: string
+  provider: string
+  model: string
+  display_name?: string
+  source?: string
+  availability: string
+  capabilities?: string[] | Record<string, unknown>
+  context_window?: number | null
+  endpoint?: string | null
+  [key: string]: unknown
+}
+export interface OrchestrationRole {
+  role: string
+  mode?: string
+  model_id?: string | null
+  fallback_ids?: string[]
+}
+export interface OrchestrationProfileRow {
+  name: string
+  active?: boolean | null
+  [key: string]: unknown
+}
+export interface OrchestrationPolicy {
+  local_only?: boolean | null
+  max_input_cost_per_million?: number | null
+  max_output_cost_per_million?: number | null
+}
+export interface OrchestrationScopeParams {
+  profile?: string | null
+  session_id?: string | null
+}
+export interface OrchestrationAssignParams {
+  profile?: string | null
+  session_id?: string | null
+  role: string
+  mode: 'auto' | 'pinned'
+  model_id?: string | null
+  fallback_ids?: string[] | null
+}
+export interface OrchestrationAssignResult {
+  role?: string | null
+  mode?: string | null
+  model_id?: string | null
+  fallback_ids?: string[] | null
+  deferred?: boolean | null
+  warning?: string | null
+  confirm_required?: boolean | null
+  [key: string]: unknown
+}
+export interface OrchestrationProfileParams {
+  profile?: string | null
+  session_id?: string | null
+  action: 'activate' | 'save' | 'import' | 'export' | 'list' | 'delete'
+  name?: string | null
+  data?: unknown | null
+}
+export interface OrchestrationProfileResult {
+  name?: string | null
+  roles?: OrchestrationRole[] | null
+  policy?: OrchestrationPolicy | null
+  profiles?: OrchestrationProfileRow[] | null
+  active_profile?: string | null
+  deleted?: string | null
+  [key: string]: unknown
+}
+export interface OrchestrationPolicyParams {
+  profile?: string | null
+  session_id?: string | null
+  action?: 'get' | 'set'
+  policy?: OrchestrationPolicy | null
+}
+export interface OrchestrationPolicyResult {
+  active_profile?: string | null
+  policy: OrchestrationPolicy
+}
+export interface OrchestrationQualifyParams {
+  profile?: string | null
+  session_id?: string | null
+  model_id: string
+  max_tokens?: number
+  timeout_seconds?: number
+}
+export interface OrchestrationQualifyResult {
+  model_id: string
+  available?: boolean
+  status?: string
+  inference_tested?: boolean
+  reason?: string | null
+  level?: string | null
+  metrics?: unknown | null
+  provenance?: unknown | null
+  quality?: unknown | null
+  settings?: unknown | null
+  timestamp?: unknown | null
+  [key: string]: unknown
+}
 /** ``word`` is the token under the cursor (``@`` prefix = context reference); ``cwd`` / ``session_id`` pick the directory the listing resolves against. */
 export interface CompletePathParams {
   profile?: string | null
@@ -6226,6 +6338,18 @@ export interface RpcMethods {
   'onboarding.start': { params: OnboardingStartParams; result: OnboardingStartResult }
   /** Whether desktop first-run onboarding is due, and the chat in progress; reads the root profile's config. */
   'onboarding.state': { params: OnboardingStateParams; result: OnboardingRunStateResult }
+  /** Persist a role model assignment, safely switching the active main session when provided. */
+  'orchestration.assign': { params: OrchestrationAssignParams; result: OrchestrationAssignResult }
+  /** Read or atomically replace the active profile's local-only and price controls. */
+  'orchestration.policy': { params: OrchestrationPolicyParams; result: OrchestrationPolicyResult }
+  /** Save, select, import, export or list non-secret agent routing profiles. */
+  'orchestration.profile': { params: OrchestrationProfileParams; result: OrchestrationProfileResult }
+  /** Explicit, bounded inference qualification on an already loaded native Ollama model. */
+  'orchestration.qualify': { params: OrchestrationQualifyParams; result: OrchestrationQualifyResult }
+  /** Explicitly refresh approved local endpoint model inventory. */
+  'orchestration.refresh': { params: OrchestrationScopeParams; result: OrchestrationStatusResult }
+  /** Read normalized model inventory and the active per-agent routing profile. */
+  'orchestration.status': { params: OrchestrationStatusParams; result: OrchestrationStatusResult }
   /** Spill a large paste to a file and hand back the inline placeholder. */
   'paste.collapse': { params: PasteCollapseParams; result: PasteCollapseResult }
   /** Render a PDF's pages to PNG and queue them as images for the next turn. */
@@ -6624,6 +6748,12 @@ export const RPC_METHODS = [
   'onboarding.skip',
   'onboarding.start',
   'onboarding.state',
+  'orchestration.assign',
+  'orchestration.policy',
+  'orchestration.profile',
+  'orchestration.qualify',
+  'orchestration.refresh',
+  'orchestration.status',
   'paste.collapse',
   'pdf.attach',
   'pet.cancel',
