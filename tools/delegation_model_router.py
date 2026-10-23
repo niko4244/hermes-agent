@@ -80,11 +80,16 @@ def delegation_model_route(
         service = ModelService()
 
     assignment_role = f"delegation.{role}"
-    state = service.status(refresh=False)
-    roles = state.get("roles", [])
-    settings = next((r for r in roles if r.get("role") == assignment_role), None)
+    # status() synthesizes baseline auto rows for built-in roles. Those rows
+    # are presentation defaults, not user authorization to change runtime.
+    # Read the persisted profile to preserve legacy delegation until the
+    # operator has explicitly assigned this role through the TUI.
+    profile = service.profile("export")
+    settings = next((r for r in profile.get("roles", []) if r.get("role") == assignment_role), None)
     if not settings:
         return defaults, None
+
+    state = service.status(refresh=False)
 
     selected = service.resolve(assignment_role)
     if selected is None:

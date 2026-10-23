@@ -21,6 +21,10 @@ class Registry:
             "local_only": self.local_only,
         }
 
+    def profile(self, action, name=None, data=None):
+        assert action == "export"
+        return {"roles": [self.role] if self.role else [], "policy": {"local_only": self.local_only}}
+
     def resolve(self, role):
         return self.row
 
@@ -47,6 +51,26 @@ def test_unconfigured_route_preserves_existing_delegation_behavior():
         "leaf", previous, SimpleNamespace(api_key="secret"), cloud_resolver, service=Registry()
     )
     assert result is previous
+    assert fallbacks is None
+
+
+def test_display_only_auto_role_does_not_change_existing_provider():
+    previous = {"model": "legacy", "provider": "anthropic"}
+
+    class DisplayOnlyRegistry(Registry):
+        def status(self, refresh=False):
+            state = super().status(refresh)
+            state["roles"] = [{"role": "delegation.leaf", "mode": "auto", "fallback_ids": []}]
+            return state
+
+        def resolve(self, role):
+            raise AssertionError("display-only default may not select a new model")
+
+    original, fallbacks = delegation_model_route(
+        "leaf", previous, SimpleNamespace(), cloud_resolver,
+        service=DisplayOnlyRegistry(),
+    )
+    assert original is previous
     assert fallbacks is None
 
 

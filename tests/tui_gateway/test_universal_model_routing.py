@@ -6,7 +6,11 @@ from unittest.mock import Mock, patch
 import pytest
 
 from tui_gateway import server
-from tui_gateway.universal_model_runtime import main_model_override, selected_profile_main_override
+from tui_gateway.universal_model_runtime import (
+    main_model_override,
+    selected_profile_main_fallbacks,
+    selected_profile_main_override,
+)
 
 
 def local_row(model="small"):
@@ -19,15 +23,27 @@ def local_row(model="small"):
 
 def test_profile_selection_only_overrides_pinned_main_and_refuses_offline():
     service = Mock()
-    service.status.return_value = {"roles": [{"role": "main", "mode": "auto"}]}
+    service.profile.return_value = {"roles": [], "policy": {}}
     assert selected_profile_main_override(service) is None
     service.resolve.assert_not_called()
 
-    service.status.return_value = {"roles": [{"role": "main", "mode": "pinned"}]}
+    service.profile.return_value = {"roles": [{"role": "main", "mode": "pinned"}], "policy": {}}
     service.resolve.return_value = local_row()
     assert selected_profile_main_override(service)["base_url"] == "http://127.0.0.1:11434/v1"
     service.resolve.return_value = None
     with pytest.raises(ValueError, match="unavailable"):
+        selected_profile_main_override(service)
+
+
+def test_explicit_auto_role_can_select_local_but_never_auto_uses_cloud_when_absent():
+    service = Mock()
+    service.profile.return_value = {"roles": [{"role": "main", "mode": "auto"}], "policy": {}}
+    service.resolve.return_value = local_row()
+    assert selected_profile_main_override(service)["model"] == "small"
+    service.resolve.return_value = None
+    assert selected_profile_main_override(service) is None
+    service.profile.return_value["policy"] = {"local_only": True}
+    with pytest.raises(ValueError, match="routing policy"):
         selected_profile_main_override(service)
 
 
@@ -121,3 +137,111 @@ def test_new_main_ollama_override_reaches_real_agent_constructor_without_cloud_r
     assert constructor.call_args.kwargs["model"] == "small"
     assert constructor.call_args.kwargs["base_url"] == "http://127.0.0.1:11434/v1"
     assert constructor.call_args.kwargs["api_key"] == "local"
+    assert constructor.call_args.kwargs["fallback_model"] == []
+
+
+def test_main_profile_pin_never_inherits_legacy_cloud_fallbacks():
+    service = Mock()
+    service.status.return_value = {
+        "roles": [{"role": "main", "mode": "pinned", "model_id": "local:one", "fallback_ids": []}],
+        "models": [local_row()], "policy": {}, "local_only": True,
+    }
+    assert selected_profile_main_fallbacks(service) == []
+    service.status.return_value["roles"][0]["mode"] = "auto"
+    assert selected_profile_main_fallbacks(service) is None
+
+
+def test_local_only_cloud_fallback_is_rejected_before_live_agent_mutation():
+    service = Mock()
+    service.status.return_value = {
+        "roles": [{"role": "main", "mode": "pinned", "fallback_ids": ["cloud:paid"]}],
+        "models": [{"id": "cloud:paid", "provider": "openrouter", "model": "paid",
+                    "availability": "configured", "source": "hermes-config"}],
+        "policy": {"local_only": True}, "local_only": True,
+    }
+    service._allowed.return_value = False
+    with pytest.raises(ValueError, match="policy"):
+        selected_profile_main_fallbacks(service)
+    agent = SimpleNamespace(switch_model=Mock())
+    with patch("tui_gateway.universal_model_runtime.selected_profile_main_fallbacks",
+               side_effect=ValueError("policy invalid")):
+        with pytest.raises(ValueError, match="policy invalid"):
+            server._apply_universal_local_switch("sid", {"agent": agent}, local_row())
+    agent.switch_model.assert_not_called()
+
+
+def test_gateway_policy_roundtrip_with_real_sqlite(tmp_path):
+    from hermes_cli.universal_models.service import ModelService
+
+    def isolated_service():
+        return ModelService(home=tmp_path, config={})
+
+    with patch("hermes_cli.universal_models.service.ModelService", side_effect=isolated_service):
+        change = server._methods["orchestration.policy"](
+            "set", {"action": "set", "policy": {"local_only": True}}
+        )
+        read = server._methods["orchestration.policy"]("get", {})
+        bad = server._methods["orchestration.policy"](
+            "invalid", {"action": "set", "policy": {"local_only": "yes"}}
+        )
+    assert change["result"]["policy"] == {"local_only": True}
+    assert read["result"]["policy"] == {"local_only": True}
+    assert bad["error"]["code"] == 5073
+    assert isolated_service().status()["policy"] == {"local_only": True}
+
+
+def test_explicit_local_fallback_is_applied_to_live_agent_before_old_cloud_chain():
+    fallback = {**local_row("spare"), "id": "local:spare"}
+    service = Mock()
+    service.status.return_value = {
+        "models": [local_row(), fallback], "roles": [], "policy": {"local_only": True},
+        "local_only": True,
+    }
+    service._allowed.return_value = True
+    service.assign.return_value = {"role": "main", "mode": "pinned", "model_id": local_row()["id"]}
+    agent = SimpleNamespace(
+        switch_model=Mock(), _fallback_chain=[{"provider": "openrouter", "model": "paid"}],
+        _fallback_index=0,
+    )
+    session = {"agent": agent, "running": False}
+    with patch.dict(server._sessions, {"sid-fallback": session}), \
+            patch("hermes_cli.universal_models.service.ModelService", return_value=service), \
+            patch.object(server, "_restart_slash_worker"), \
+            patch.object(server, "_persist_live_session_runtime"), \
+            patch.object(server, "_append_model_switch_marker"), \
+            patch.object(server, "_session_info", return_value={}), \
+            patch.object(server, "_emit"):
+        response = server._methods["orchestration.assign"](
+            "rid", {"role": "main", "mode": "pinned", "model_id": local_row()["id"],
+                    "fallback_ids": [fallback["id"]], "session_id": "sid-fallback"}
+        )
+    assert response["result"]["mode"] == "pinned"
+    assert len(agent._fallback_chain) == 1
+    assert agent._fallback_chain[0]["model"] == "spare"
+    assert agent._fallback_chain[0]["api_key"] == "local"
+
+
+def test_qualify_rpc_is_bounded_and_never_calls_unverified_or_cloud_models():
+    service = Mock()
+    service.status.return_value = {"models": [local_row(), {
+        "id": "cloud:paid", "model": "paid", "provider": "openrouter",
+        "source": "hermes-config", "availability": "configured",
+    }]}
+    service.qualify.return_value = {"model_id": local_row()["id"], "status": "passed", "inference_tested": True}
+    with patch("hermes_cli.universal_models.service.ModelService", return_value=service):
+        good = server._methods["orchestration.qualify"](
+            "r", {"model_id": local_row()["id"], "max_tokens": 24, "timeout_seconds": 8}
+        )
+        remote = server._methods["orchestration.qualify"](
+            "cloud", {"model_id": "cloud:paid"}
+        )
+        oversized = server._methods["orchestration.qualify"](
+            "oversized", {"model_id": local_row()["id"], "max_tokens": 65536}
+        )
+    assert good["result"]["status"] == "passed"
+    service.qualify.assert_called_once_with(
+        local_row()["id"], run_inference=True, timeout_seconds=8.0,
+        max_tokens=24, require_loaded=True,
+    )
+    assert remote["error"]["code"] == 4004
+    assert oversized["error"]["code"] == 4002

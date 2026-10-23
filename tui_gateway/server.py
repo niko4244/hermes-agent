@@ -228,6 +228,7 @@ _LONG_HANDLERS = frozenset(
         "model.options",
         "orchestration.status",
         "orchestration.refresh",
+        "orchestration.qualify",
         # Pet RPCs hit the network (manifest fetch / spritesheet download) or do
         # per-frame PNG decode/encode (pet.cells): inline they serialize on the
         # reader thread, so picker previews trickle in one at a time and the
@@ -3688,7 +3689,7 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
             try:
                 from hermes_cli.universal_models.service import ModelService
 
-                observed = ModelService().status(refresh=False).get("models", [])
+                observed = ModelService().status(refresh=True).get("models", [])
                 if any(
                     item.get("source") == "ollama-live"
                     and item.get("model") == model
@@ -4657,7 +4658,8 @@ def _apply_pending_model_switch(sid: str, session: dict) -> None:
 
 
 def _apply_universal_local_switch(
-    sid: str, session: dict, record: dict, *, at_turn_start: bool = False
+    sid: str, session: dict, record: dict, *, at_turn_start: bool = False,
+    approved_fallbacks: list[dict] | None = None,
 ) -> None:
     """Switch an idle native Ollama agent; keep the pending-turn guard in caller."""
     from tui_gateway.universal_model_runtime import main_model_override
@@ -4667,6 +4669,15 @@ def _apply_universal_local_switch(
     runtime = main_model_override(record)
     if not runtime.get("_universal_local"):
         raise ValueError("local model switch requires an observed Ollama backend")
+    # Validate the entire declared chain before mutating the live agent.
+    # Otherwise an invalid fallback could leave a switched agent with its
+    # previous (possibly paid) provider chain after a reported RPC error.
+    from tui_gateway.universal_model_runtime import selected_profile_main_fallbacks
+
+    if approved_fallbacks is None:
+        approved_fallbacks = selected_profile_main_fallbacks()
+    if approved_fallbacks is None:
+        approved_fallbacks = []
     agent = session.get("agent")
     if agent is not None:
         agent.switch_model(
@@ -4674,8 +4685,9 @@ def _apply_universal_local_switch(
             api_key="local", base_url=runtime["base_url"],
             api_mode="chat_completions",
         )
-        # A local pin never inherits a preexisting unrelated cloud fallback.
-        agent._fallback_chain = []
+        # The declared profile chain is enforced at the runtime boundary.
+        # Never keep a preexisting global cloud fallback by accident.
+        agent._fallback_chain = approved_fallbacks
         agent._fallback_index = 0
         _restart_slash_worker(sid, session)
         _persist_live_session_runtime(session)
@@ -6513,6 +6525,11 @@ def _make_agent(
                 raise RuntimeError("Auth fallback resolved without a model")
             model = resolution.selected_model
     _pr = _load_provider_routing()
+    selected_fallbacks = None
+    if isinstance(model_override, dict) and model_override.get("_universal_local"):
+        from tui_gateway.universal_model_runtime import selected_profile_main_fallbacks
+
+        selected_fallbacks = selected_profile_main_fallbacks()
     return AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 500),
@@ -6557,7 +6574,11 @@ def _make_agent(
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
         skip_context_files=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
         skip_memory=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
-        fallback_model=_load_fallback_model(),
+        fallback_model=(
+            (selected_fallbacks or [])
+            if isinstance(model_override, dict) and model_override.get("_universal_local")
+            else _load_fallback_model()
+        ),
         **_agent_cbs(sid),
     )
 

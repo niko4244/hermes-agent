@@ -20,7 +20,7 @@ def _selected_model(record: dict) -> str:
     if not isinstance(provider, str) or not provider.strip():
         raise ValueError("selected model has no provider")
     # Hermes switches via --provider; colon is part of valid model IDs.
-    if any(c in model for c in ("\x00", "\r", "\n", " --")) or any(c in provider for c in (" ", "\x00", "\r", "\n", "--")):
+    if any(c.isspace() for c in model + provider) or model.startswith("-") or provider.startswith("-"):
         raise ValueError("invalid provider or model identity")
     return f"{model} --provider {provider} --session"
 
@@ -88,12 +88,23 @@ def _(rid, params: dict) -> dict:
                 # Observed native Ollama supports a direct keyless session
                 # switch. Non-Ollama proxies use the existing credentialed
                 # model switch and never inherit a cloud key by accident.
-                from tui_gateway.universal_model_runtime import main_model_override
+                from tui_gateway.universal_model_runtime import (
+                    approved_main_fallbacks_for_ids,
+                    main_model_override,
+                )
 
                 main_model_override(model)
+                # Preflight the *proposed* chain, not the previously saved
+                # profile. The live runtime and the profile must agree.
+                approved_fallbacks = approved_main_fallbacks_for_ids(
+                    service, fallbacks or [], state=state,
+                )
                 live_session = _sessions.get(params.get("session_id", ""))
                 if live_session is not None and not live_session.get("running"):
-                    _apply_universal_local_switch(params.get("session_id", ""), live_session, model)
+                    _apply_universal_local_switch(
+                        params.get("session_id", ""), live_session, model,
+                        approved_fallbacks=approved_fallbacks,
+                    )
                 switch = {"result": {"deferred": bool(live_session and live_session.get("running"))}}
             else:
                 from tui_gateway.methods_orchestration import _selected_model
@@ -111,6 +122,10 @@ def _(rid, params: dict) -> dict:
                 if (switch.get("result") or {}).get("confirm_required"):
                     return _ok(rid, {"confirm_required": True, "warning": "Provider requires explicit cost confirmation before selecting"})
         assigned = service.assign(role, mode, selected_id, fallbacks)
+        if role == "main" and mode == "auto":
+            assigned = dict(assigned)
+            assigned["deferred"] = True
+            assigned["warning"] = "Automatic main routing applies when a new agent session starts"
         if switch is not None:
             assigned = dict(assigned)
             assigned["deferred"] = bool((switch.get("result") or {}).get("deferred"))
@@ -134,6 +149,73 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, ModelService().profile(action, params.get("name"), params.get("data")))
     except (ValueError, TypeError, OSError, KeyError) as exc:
         return _err(rid, 5072, f"Model profile failed: {type(exc).__name__}")
+
+
+@method("orchestration.policy")
+def _(rid, params: dict) -> dict:
+    """Read or atomically replace routing limits for the active profile."""
+    action = params.get("action", "get")
+    if action not in {"get", "set"}:
+        return _err(rid, 4002, "policy action must be get or set")
+    if action == "set" and not isinstance(params.get("policy"), dict):
+        return _err(rid, 4002, "policy must be a JSON object")
+    try:
+        from hermes_cli.universal_models.service import ModelService
+
+        service = ModelService()
+        if action == "set":
+            # ModelService.profile validates the complete profile (including
+            # unknown keys and negative cost caps) before writing it.
+            current = service.profile("export")
+            replacement = {
+                "name": current["name"], "roles": current["roles"],
+                "policy": params["policy"],
+            }
+            service.profile("save", current["name"], replacement)
+        result = service.status(refresh=False)
+        return _ok(rid, {"policy": result.get("policy", {}), "active_profile": result.get("active_profile")})
+    except (ValueError, TypeError, OSError, KeyError):
+        return _err(rid, 5073, "Model policy update failed; review policy fields")
+
+
+@method("orchestration.qualify")
+def _(rid, params: dict) -> dict:
+    """One explicitly requested, bounded, already-loaded Ollama inference test.
+
+    Running this RPC never enumerates or calls any cloud model. The concrete
+    model identity must have a recent native Ollama observation, and the
+    service independently rechecks /api/tags plus /api/ps before generation.
+    """
+    model_id = params.get("model_id")
+    max_tokens = params.get("max_tokens", 16)
+    timeout = params.get("timeout_seconds", 15)
+    if not isinstance(model_id, str) or not 0 < len(model_id) <= 650:
+        return _err(rid, 4002, "model_id must identify a discovered model")
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 1 <= max_tokens <= 64:
+        return _err(rid, 4002, "max_tokens must be 1–64")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 1 <= timeout <= 30:
+        return _err(rid, 4002, "timeout_seconds must be 1–30")
+    try:
+        from hermes_cli.universal_models.service import ModelService
+
+        service = ModelService()
+        candidates = service.status(refresh=False).get("models", [])
+        item = next((m for m in candidates if m.get("id") == model_id), None)
+        if item is None or item.get("source") != "ollama-live" or item.get("availability") != "reachable":
+            return _err(rid, 4004, "refresh a native local Ollama model before qualification")
+        from hermes_cli.universal_models.qualification import _valid_origin
+
+        if _valid_origin(item) is None:
+            return _err(rid, 4004, "only direct loopback Ollama inference can be qualified")
+        result = service.qualify(
+            model_id, run_inference=True, timeout_seconds=float(timeout),
+            max_tokens=max_tokens, require_loaded=True,
+        )
+        return _ok(rid, result)
+    except (ValueError, TypeError, OSError, KeyError):
+        # HTTP failures, URLs or exception messages may contain credentials;
+        # report a stable generic error instead of reflecting raw metadata.
+        return _err(rid, 5074, "Local model qualification failed; check Ollama availability")
 
 
 def register(server) -> None:
