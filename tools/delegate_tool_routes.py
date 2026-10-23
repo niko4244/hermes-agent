@@ -201,9 +201,22 @@ def _profile_route(home: Path) -> TaskRoute:
         try:
             rt = resolve_runtime_provider(**request)
         except Exception as exc:
-            raise DelegationRouteError(f"Profile at {home} has no usable model provider: {exc}") from exc
+            # Provider errors can contain bearer tokens or another profile's
+            # secret-bearing URL. Task refusal text is model-visible.
+            raise DelegationRouteError(
+                f"Profile at {home} has no usable model provider; check that profile's provider configuration."
+            ) from exc
         model = request["target_model"] or rt.get("model") or None
         fallback = cfg.get("fallback_providers")
+        from tools.delegation_model_router import enforce_explicit_route_policy
+
+        # Scope matters: this is the target profile's independently saved
+        # local-only/cost policy, not the launching profile or its model pool.
+        enforce_explicit_route_policy(
+            {"provider": rt.get("provider"), "model": model, "base_url": rt.get("base_url"),
+             "api_key": rt.get("api_key")},
+            None, {"fallback_providers": fallback if isinstance(fallback, list) else []},
+        )
     # A named custom provider resolves to provider "custom": keep its name as the identity (as delegation.provider
     # does) so two named providers sharing one URL never lease each other's pool.
     requested = str(rt.get("requested_provider") or "").strip()
@@ -258,10 +271,12 @@ def _resolve_route(route: dict[str, Any], parent_agent: Any, backend: str,
         )
         if saved_chain is not None:
             route = {**route, "fallback_providers": saved_chain}
-    else:
-        from tools.delegation_model_router import enforce_explicit_route_policy
+    # Policies govern every executable child, including a legacy inherited
+    # route with no saved role, not just an explicit task pin. Validate the
+    # effective fallback chain after saved role selection and scope resolution.
+    from tools.delegation_model_router import enforce_explicit_route_policy
 
-        enforce_explicit_route_policy(creds, parent_agent, route)
+    enforce_explicit_route_policy(creds, parent_agent, route)
     if route.get("service_tier") not in (None, ""):
         from tools.delegate_tool_tuning import task_service_tier
         creds = {**creds, **task_service_tier(str(route["service_tier"]), creds, parent_agent)}

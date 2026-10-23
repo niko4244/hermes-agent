@@ -85,6 +85,15 @@ def test_child_effective_depth_selects_orchestrator_then_leaf_not_task_role(rout
     assert err is None and nested.creds["model"] == "coder"
 
 
+def test_orchestrator_kill_switch_forces_leaf_model_even_before_depth_ceiling(routing, monkeypatch):
+    service, _, _, execute = routing
+    service.assign("delegation.leaf", "pinned", "deepseek::coder")
+    service.assign("delegation.orchestrator", "pinned", "deepseek::orchestrator")
+    monkeypatch.setattr("tools.delegate_tool._get_orchestrator_enabled", lambda: False)
+    (child,), err = execute([{}], depth=0)
+    assert err is None and child.creds["model"] == "coder"
+
+
 @pytest.mark.parametrize("route", [
     {"provider": "anthropic", "model": "task-owned"},
     {"model": "per-task-model"},
@@ -153,6 +162,23 @@ def test_local_only_policy_refuses_explicit_cloud_pin_without_fallback(routing):
     assert "local-only" in (refused.error or "")
 
 
+@pytest.mark.parametrize("cap", ["max_input_cost_per_million", "max_output_cost_per_million"])
+def test_explicit_owner_route_cannot_bypass_saved_cost_cap_without_verified_price(routing, cap):
+    service, _, _, execute = routing
+    service.profile("save", "default", {"roles": [], "policy": {cap: 0.01}})
+    (refused,), error = execute([{"provider": "deepseek", "model": "coder"}], depth=1)
+    assert error is None and refused.creds == {}
+    assert "cost" in (refused.error or "").lower()
+
+
+def test_unassigned_role_cannot_inherit_cloud_route_under_saved_local_only_policy(routing):
+    service, _, _, execute = routing
+    service.profile("save", "default", {"roles": [], "policy": {"local_only": True}})
+    (refused,), error = execute([{}], depth=1)
+    assert error is None and refused.creds == {}
+    assert "local-only" in (refused.error or "")
+
+
 def test_local_only_explicit_native_pin_requires_exact_listed_endpoint(routing):
     import json
     import time
@@ -188,3 +214,69 @@ def test_legacy_delegation_without_saved_registry_is_nonmutating(tmp_path, monke
     route = _route_to_task_route({}, parent, {})
     assert route.creds["provider"] is None and route.routing_cfg == {}
     assert not (tmp_path / "universal_models.sqlite3").exists()
+
+
+@pytest.mark.parametrize("policy", [
+    {"local_only": True},
+    {"max_input_cost_per_million": 0.1},
+    {"max_output_cost_per_million": 0.1},
+])
+def test_cross_profile_route_checks_target_saved_policy_not_launch_profile(tmp_path, monkeypatch, policy):
+    from contextlib import contextmanager
+
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from tools.delegate_tool_routes import _route_to_task_route
+
+    target_home = tmp_path / "target"
+    target_cfg = {"model": {"provider": "deepseek", "default": "coder"},
+                  "providers": {"deepseek": {"models": ["coder"]}}}
+    target_service = ModelService(home=target_home, config=target_cfg, local_endpoints=[], model_paths=[])
+    target_service.profile("save", "default", {"roles": [], "policy": policy})
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "launch"))
+
+    @contextmanager
+    def target_scope(home):
+        token = set_hermes_home_override(str(home))
+        try:
+            yield
+        finally:
+            reset_hermes_home_override(token)
+
+    monkeypatch.setattr("tools.delegate_tool_routes._profile_home", lambda _: target_home)
+    monkeypatch.setattr("tools.delegate_tool_routes.delegated_profile_scope", target_scope)
+    monkeypatch.setattr("tools.delegate_tool_routes._refuse_under_worker_snapshot", lambda _: None)
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: target_cfg)
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", lambda **kw: {
+        "provider": "deepseek", "model": "coder", "base_url": "https://deepseek.example/v1",
+        "api_key": "TARGET_SECRET", "api_mode": "chat_completions", "request_overrides": {},
+    })
+
+    with pytest.raises(ValueError) as failure:
+        _route_to_task_route({"profile": "target"}, SimpleNamespace(provider="openrouter",
+                             api_key="PARENT_SECRET"), {})
+    refusal = str(failure.value)
+    assert ("local-only" if "local_only" in policy else "cost cap") in refusal
+    assert "TARGET_SECRET" not in refusal
+    assert "PARENT_SECRET" not in refusal
+
+
+def test_target_profile_resolver_exception_redacted(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+
+    from tools.delegate_tool_routes import _route_to_task_route
+
+    monkeypatch.setattr("tools.delegate_tool_routes._profile_home", lambda _: tmp_path / "target")
+    monkeypatch.setattr("tools.delegate_tool_routes.delegated_profile_scope", lambda _: nullcontext())
+    monkeypatch.setattr("tools.delegate_tool_routes._refuse_under_worker_snapshot", lambda _: None)
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {
+        "model": {"provider": "deepseek", "default": "coder"}})
+
+    def bad_resolver(**kw):
+        raise ValueError("resolver error sk-SUPERSECRET, parent PARENT_KEY")
+
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", bad_resolver)
+    with pytest.raises(ValueError) as failure:
+        _route_to_task_route({"profile": "target"}, SimpleNamespace(), {})
+    refusal = str(failure.value)
+    assert "no usable model provider" in refusal
+    assert "SUPERSECRET" not in refusal and "PARENT_KEY" not in refusal

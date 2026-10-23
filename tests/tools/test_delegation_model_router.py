@@ -183,3 +183,69 @@ def test_cloud_resolution_error_never_exposes_credentials_to_child_tool_result()
                                service=Registry(cloud, role=assigned()))
     assert "sk-secret-from-provider" not in str(failure.value)
     assert "parent-secret" not in str(failure.value)
+
+
+def test_saved_registered_custom_provider_uses_configured_name_not_inventory_namespace(monkeypatch):
+    from hermes_cli import config as config_module
+
+    monkeypatch.setattr(config_module, "load_config_readonly", lambda: {"providers": {
+        "cloudbird": {"base_url": "https://cloudbird.example/v1", "models": ["coder"],
+                      "api_key": "TARGET_KEY"}}})
+    selected = {"id": "custom:cloudbird::coder", "provider": "custom:cloudbird", "model": "coder",
+                "availability": "configured", "source": "hermes-provider"}
+    calls = []
+
+    def resolver(request, parent):
+        calls.append(request)
+        return {"provider": request["provider"], "model": request["model"], "api_key": "TARGET_KEY",
+                "base_url": "https://cloudbird.example/v1", "api_mode": "chat_completions"}
+
+    creds, fallbacks = delegation_model_route("leaf", {}, SimpleNamespace(api_key="PARENT_KEY"), resolver,
+                                               service=Registry(selected, role=assigned()))
+    assert calls == [{"provider": "cloudbird", "model": "coder"}]
+    assert creds["api_key"] == "TARGET_KEY" and fallbacks == []
+
+
+def test_saved_custom_identity_cannot_resolve_to_unrelated_provider(monkeypatch):
+    from hermes_cli import config as config_module
+
+    monkeypatch.setattr(config_module, "load_config_readonly", lambda: {"providers": {
+        "cloudbird": {"base_url": "https://cloudbird.example/v1", "models": ["coder"],
+                      "api_key": "TARGET_KEY"}}})
+    selected = {"id": "custom:cloudbird::coder", "provider": "custom:cloudbird", "model": "coder",
+                "availability": "configured", "source": "hermes-provider"}
+
+    def resolver(request, parent):
+        return {"provider": "openrouter", "model": "coder", "api_key": "PARENT_KEY",
+                "base_url": "https://parent.invalid/v1"}
+
+    with pytest.raises(ValueError, match="identity"):
+        delegation_model_route("leaf", {}, SimpleNamespace(), resolver,
+                               service=Registry(selected, role=assigned()))
+
+
+@pytest.mark.parametrize("price", [float("nan"), float("inf"), -1.0, True, None])
+def test_cost_cap_rejects_unverified_bad_numeric_values_and_unknown_fallback(monkeypatch, price):
+    from tools.delegation_model_router import enforce_explicit_route_policy
+
+    rows = [
+        {"provider": "deepseek", "model": "coder", "availability": "configured",
+         "source": "hermes-provider", "max_input_cost_per_million": price},
+        {"provider": "openrouter", "model": "fallback", "availability": "configured",
+         "source": "hermes-provider"},
+    ]
+
+    class CostRegistry:
+        def status(self, refresh=False):
+            return {"policy": {"max_input_cost_per_million": 1.0}, "models": rows}
+
+    monkeypatch.setattr("tools.delegation_model_router._active_registry", lambda: CostRegistry())
+    route = {"provider": "deepseek", "model": "coder", "base_url": "https://deepseek.test/v1"}
+    with pytest.raises(ValueError, match="cost cap"):
+        enforce_explicit_route_policy(route, SimpleNamespace(), {"fallback_providers": []})
+
+    rows[0]["max_input_cost_per_million"] = 0.5
+    with pytest.raises(ValueError, match="fallback"):
+        enforce_explicit_route_policy(route, SimpleNamespace(), {"fallback_providers": [
+            {"provider": "openrouter", "model": "fallback"},
+        ]})
