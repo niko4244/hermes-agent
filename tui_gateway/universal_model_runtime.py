@@ -160,11 +160,48 @@ def enforce_main_turn_policy(agent: Any, session: dict, service: Any = None) -> 
             # continue although the user selected a different profile.
             raise ValueError("Active profile no longer authorizes this session model")
     if isinstance(override, dict) and override.get("_universal_selection") and not getattr(agent, "_fallback_activated", False):
+        selected_provider = override.get("provider")
+        current_provider = str(getattr(agent, "provider", "") or "")
+        if isinstance(selected_provider, str) and selected_provider.startswith("custom:"):
+            # Runtime providers use Hermes' configured key, while registry
+            # records use the discovery namespace. Keep the configured origin
+            # bound even if another named provider serves the same model slug.
+            from tools.delegation_model_router import _registered_custom_provider
+
+            configured = _registered_custom_provider(selected_provider)
+            provider_matches = (configured is not None
+                                and current_provider in {"custom", configured[0]}
+                                and getattr(agent, "requested_provider", None) == configured[0]
+                                and str(getattr(agent, "base_url", "") or "").rstrip("/") == configured[1])
+        else:
+            provider_matches = current_provider == selected_provider
         if (str(getattr(agent, "model", "") or "") != override.get("model")
+                or not provider_matches
                 or (override.get("_universal_local") and
                     (str(getattr(agent, "base_url", "") or "") != override.get("base_url")
                      or getattr(agent, "api_key", None) != "local"))):
             raise ValueError("Current session does not match its saved model selection")
+    if (isinstance(override, dict) and override.get("_universal_selection")
+            and saved_main and saved_main.get("mode") == "pinned"
+            and getattr(agent, "_provider_fallback_active", False)):
+        # A fallback may remain active between turns when the primary route
+        # cannot be restored (for example after an entitlement rejection).
+        # Profile edits revoke prior fallback IDs even when no local-only or
+        # price cap is configured; a refreshed future chain alone is not enough.
+        authorized = (approved_main_fallbacks_for_ids(service, saved_ids)
+                      if saved_ids else [])
+        current_model = str(getattr(agent, "model", "") or "")
+        current_provider = str(getattr(agent, "provider", "") or "")
+        current_endpoint = str(getattr(agent, "base_url", "") or "").rstrip("/")
+        if not any(
+            entry.get("model") == current_model
+            and entry.get("provider") == current_provider
+            and (not entry.get("base_url")
+                 or str(entry["base_url"]).rstrip("/") == current_endpoint)
+            and (entry.get("api_key") != "local" or getattr(agent, "api_key", None) == "local")
+            for entry in authorized
+        ):
+            raise ValueError("Active profile no longer authorizes this session fallback")
     if not (policy.get("local_only") is True or
             "max_input_cost_per_million" in policy or
             "max_output_cost_per_million" in policy):
