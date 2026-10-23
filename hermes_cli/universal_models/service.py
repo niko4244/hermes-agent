@@ -26,6 +26,7 @@ from .discovery import (
     on_disk_models,
     safe_endpoint,
 )
+from .qualification import qualify_native_ollama
 
 
 _PROFILE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
@@ -152,6 +153,7 @@ class ModelService:
             conn.execute("CREATE TABLE IF NOT EXISTS profiles (name TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS observations (name TEXT PRIMARY KEY, payload TEXT NOT NULL, measured_at REAL NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS qualifications (model_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             conn.execute("INSERT OR IGNORE INTO profiles(name,payload) VALUES (?,?)", ("default", json.dumps({"roles": [], "policy": {}})))
             conn.execute("INSERT OR IGNORE INTO metadata(key,value) VALUES ('active_profile','default')")
         if os.name != "nt":
@@ -193,7 +195,21 @@ class ModelService:
         rows = configured_models(config) + litellm_models(self.litellm_paths, config)
         rows += on_disk_models(self.model_paths)
         rows += self._observations()
-        return merge_models(rows)
+        merged = merge_models(rows)
+        with self._connect() as conn:
+            details = dict(conn.execute("SELECT model_id,payload FROM qualifications"))
+        for row in merged:
+            payload = details.get(row["id"])
+            if payload is not None:
+                try:
+                    record = json.loads(payload)
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(record, dict):
+                    # Historic evidence is visibly timestamped; it never
+                    # upgrades an expired or configured row to 'reachable'.
+                    row["last_qualification"] = record
+        return merged
 
     def _probe_endpoints(self) -> tuple[str, ...]:
         """Include the operator's explicitly configured local endpoints."""
@@ -218,7 +234,7 @@ class ModelService:
     def _recent(self, name: str) -> Any:
         with self._connect() as conn:
             observation = conn.execute("SELECT payload,measured_at FROM observations WHERE name=?", (name,)).fetchone()
-        if not observation or time.time() - observation[1] > 120:
+        if not observation or not 0 <= time.time() - observation[1] <= 120:
             return None
         try:
             return json.loads(observation[0])
@@ -368,20 +384,73 @@ class ModelService:
             if isinstance(model, dict):
                 provider, name = model.get("provider"), model.get("default") or model.get("name") or model.get("model")
                 if provider and name:
-                    assignment = {"mode": "manual", "model_id": f"{provider}::{name}", "fallback_ids": []}
+                    # Current Hermes model is an explicit operator selection,
+                    # so do not override it with an implicit local-auto choice.
+                    assignment = {"mode": "pinned", "model_id": f"{provider}::{name}", "fallback_ids": []}
         if assignment is None:
-            return None
+            if role.startswith("delegation.") or role.startswith("auxiliary."):
+                # Status displays these untouched built-in roles as auto. Keep
+                # runtime resolution consistent with the displayed setting.
+                assignment = {"mode": "auto", "model_id": None, "fallback_ids": []}
+            else:
+                return None
         index = {row["id"]: row for row in self._inventory()}
-        candidates = [assignment.get("model_id"), *assignment.get("fallback_ids", [])]
-        # Auto routing stays within explicit preferences, never explores the
-        # rest of a user's paid catalogs on its own.
+        if assignment["mode"] == "pinned":
+            # An unavailable pin never silently runs another model. Fallback
+            # decisions belong to the execution layer after an actual failure.
+            candidates = [assignment.get("model_id")]
+        else:
+            candidates = [assignment.get("model_id"), *assignment.get("fallback_ids", [])]
+            if not any(candidates):
+                # Default auto discovery may only select independently listed
+                # native local Ollama models; never surprise-call paid cloud.
+                candidates = [row["id"] for row in sorted(index.values(), key=lambda m: m["id"])
+                              if row.get("source") == "ollama-live" and row.get("availability") == "reachable"]
         for model_id in candidates:
             if model_id in index and self._allowed(index[model_id], active["policy"], required, min_context):
                 return dict(index[model_id])
         return None
 
-    def qualify(self, model_id: str) -> dict:
-        """Opt-in, metadata-only local probe; does not assert inference quality."""
-        self.refresh()
-        row = next((row for row in self._inventory() if row["id"] == model_id), None)
-        return {"model_id": model_id, "available": bool(row and row["availability"] == "reachable"), "level": "model-list-only", "inference_tested": False}
+    def qualify(
+        self, model_id: str, *, run_inference: bool = False,
+        timeout_seconds: float = 15.0, max_tokens: int = 16, require_loaded: bool = True,
+    ) -> dict:
+        """Explicit bounded inference on a verified *native local Ollama* model.
+
+        For compatibility, `qualify(model_id)` performs listing-only discovery.
+        Generation requires `run_inference=True`; it probes the selected native
+        Ollama endpoint only, runs one fixed prompt, and stores sanitized metrics.
+        """
+        if not isinstance(model_id, str) or len(model_id) > 650 or not model_id:
+            raise ValueError("model_id must be a nonempty discovered identifier")
+        if not isinstance(run_inference, bool):
+            raise ValueError("run_inference must be a boolean")
+        if not run_inference:
+            self.refresh()
+            row = next((r for r in self._inventory() if r["id"] == model_id), None)
+            return {"model_id": model_id, "available": bool(row and row["availability"] == "reachable"), "level": "model-list-only", "inference_tested": False}
+        # No discovery-wide refresh here: that could probe unrelated servers.
+        # Only a recently listed, endpoint-scoped Ollama identity is eligible.
+        row = next((r for r in self._observations() if r.get("id") == model_id), None)
+        if row is None:
+            raise ValueError("inference qualification requires a recent explicit local discovery refresh")
+        record = qualify_native_ollama(row, timeout_seconds=timeout_seconds,
+                                       max_tokens=max_tokens, require_loaded=require_loaded)
+        with self._connect() as conn:
+            conn.execute("INSERT INTO qualifications(model_id,payload) VALUES (?,?) "
+                         "ON CONFLICT(model_id) DO UPDATE SET payload=excluded.payload",
+                         (model_id, json.dumps(record, sort_keys=True, separators=(",", ":"))))
+        return record
+
+    def qualification(self, model_id: str) -> dict | None:
+        """Read historic qualification evidence, including expired local models."""
+        if not isinstance(model_id, str) or not model_id or len(model_id) > 650:
+            raise ValueError("model_id must be a nonempty discovered identifier")
+        with self._connect() as conn:
+            row = conn.execute("SELECT payload FROM qualifications WHERE model_id=?", (model_id,)).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row[0])
+        if not isinstance(payload, dict):
+            raise ValueError("stored qualification is malformed")
+        return payload

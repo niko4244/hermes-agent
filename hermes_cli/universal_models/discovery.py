@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import urllib.error
@@ -206,7 +205,13 @@ def on_disk_models(paths: tuple[Path, ...]) -> list[dict]:
 
 def _get_json(url: str, timeout: float) -> dict | None:
     try:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        # Do not allow a local-looking server to redirect read-only discovery
+        # to an arbitrary external service.
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         with opener.open(urllib.request.Request(url, headers={"Accept": "application/json"}), timeout=timeout) as response:
             if response.status != 200:
                 return None
@@ -231,10 +236,28 @@ def local_server_models(endpoints: tuple[str, ...], *, timeout: float = 0.6) -> 
             continue
         tags = _get_json(f"{clean}/api/tags", timeout)
         if tags is not None and isinstance(tags.get("models"), list):
+            # Actual *loaded* context is measured by Ollama /api/ps. Config
+            # model max context is not the runtime's active context budget.
+            process_list = _get_json(f"{clean}/api/ps", timeout)
+            loaded: dict[str, dict] = {}
+            if isinstance(process_list, dict) and isinstance(process_list.get("models"), list):
+                for process in process_list["models"][:1000]:
+                    if isinstance(process, dict):
+                        identity = _name(process.get("name") or process.get("model"))
+                        if identity:
+                            loaded[identity] = process
             for item in tags["models"][:1000]:
                 model = _name(item.get("name") if isinstance(item, dict) else None)
                 if model:
-                    entries.append(_row("custom", model, "ollama-live", "reachable", endpoint=f"{clean}/v1"))
+                    row = _row("custom", model, "ollama-live", "reachable", endpoint=f"{clean}/v1")
+                    running = loaded.get(model)
+                    if running is not None:
+                        row["loaded"] = True
+                        context = running.get("context_length")
+                        if isinstance(context, int) and not isinstance(context, bool) and 0 < context <= 10_000_000:
+                            row["context_window"] = context
+                            row["context_source"] = "ollama_api_ps_loaded_context"
+                    entries.append(row)
             continue
         data = _get_json(f"{clean}/v1/models", timeout)
         if data is None:
@@ -249,7 +272,39 @@ def local_server_models(endpoints: tuple[str, ...], *, timeout: float = 0.6) -> 
 
 def hardware_summary() -> dict:
     """Best-effort local capacity, not a model fit/benchmark claim."""
-    result: dict[str, Any] = {"gpu": [], "gpu_discovery": "unavailable"}
+    logical_cpus = os.cpu_count()
+    result: dict[str, Any] = {
+        "gpu": [], "gpu_discovery": "unavailable",
+        "cpu_logical_cores": logical_cpus if isinstance(logical_cpus, int) and logical_cpus > 0 else None,
+        "ram_total_mib": None,
+        "ram_source": "unavailable",
+    }
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [
+                    ("length", ctypes.c_ulong), ("load", ctypes.c_ulong),
+                    ("total_physical", ctypes.c_ulonglong), ("available_physical", ctypes.c_ulonglong),
+                    ("total_page", ctypes.c_ulonglong), ("available_page", ctypes.c_ulonglong),
+                    ("total_virtual", ctypes.c_ulonglong), ("available_virtual", ctypes.c_ulonglong),
+                    ("extended", ctypes.c_ulonglong),
+                ]
+
+            memory = MemoryStatus()
+            memory.length = ctypes.sizeof(memory)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory)):
+                result["ram_total_mib"] = int(memory.total_physical // (1024 * 1024))
+                result["ram_available_mib"] = int(memory.available_physical // (1024 * 1024))
+                result["ram_source"] = "windows_global_memory_status"
+        elif hasattr(os, "sysconf"):
+            total = int(os.sysconf("SC_PHYS_PAGES")) * int(os.sysconf("SC_PAGE_SIZE"))
+            if total > 0:
+                result["ram_total_mib"] = total // (1024 * 1024)
+                result["ram_source"] = "sysconf_physical_memory"
+    except (AttributeError, OSError, ValueError):
+        pass
     if not shutil.which("nvidia-smi"):
         return result
     try:
