@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import tempfile
 import threading
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -14,7 +16,8 @@ from hermes_cli.universal_models import ModelService
 
 @pytest.fixture
 def local_ollama():
-    state = {"loaded": True, "requests": [], "response": "4", "mode": "success", "eval_count": 2}
+    state = {"loaded": True, "requests": [], "response": "4", "mode": "success", "eval_count": 2,
+             "done_reason": "stop"}
 
     class NativeOllama(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -61,7 +64,8 @@ def local_ollama():
             first = {"model": model, "message": {"role": "assistant", "content": state["response"]}}
             self.wfile.write(json.dumps(first).encode() + b"\n")
             if state["mode"] != "incomplete":
-                final = {"model": model, "done": True, "message": {"role": "assistant", "content": ""},
+                final = {"model": model, "done": True, "done_reason": state["done_reason"],
+                         "message": {"role": "assistant", "content": ""},
                          "eval_count": state["eval_count"], "eval_duration": 1_000_000_000}
                 self.wfile.write(json.dumps(final).encode() + b"\n")
             self.wfile.flush()
@@ -120,6 +124,21 @@ def test_bounded_real_http_stream_collects_provenance_and_persists(tmp_path, loc
     assert '"content":' not in stored
 
 
+@pytest.mark.platforms("windows")
+def test_real_qualification_closes_sqlite_handles_before_temp_home_cleanup(tmp_path, local_ollama):
+    url, state = local_ollama
+    # Regression for a real WinError 32 after an otherwise successful local
+    # qualifier call: sqlite3's context manager does NOT close the DB file.
+    with tempfile.TemporaryDirectory(dir=tmp_path, prefix="model-qual-") as directory:
+        service, model = _service(Path(directory), url)
+        assert service.qualify(model["id"], run_inference=True, max_tokens=8)["status"] == "passed"
+        assert service.qualification(model["id"])["inference_tested"] is True
+        assert state["requests"].count(("POST", "/api/chat")) == 1
+        db_path = Path(directory) / "universal_models.sqlite3"
+        assert db_path.exists()
+    assert not Path(directory).exists()
+
+
 def test_unloaded_model_refuses_before_post_and_does_not_trigger_load(tmp_path, local_ollama):
     url, state = local_ollama
     service, model = _service(tmp_path, url)
@@ -173,6 +192,20 @@ def test_server_ignoring_token_ceiling_invalidates_qualification(tmp_path, local
     assert result["inference_tested"] is False
     assert result["status"] == "failed"
     assert result["reason"] == "stream_failed_or_incomplete"
+
+
+@pytest.mark.parametrize("done_reason", ["length", "unload", "error"])
+def test_done_true_with_nonstop_reason_must_not_pass_partial_answer(tmp_path, local_ollama, done_reason):
+    url, state = local_ollama
+    service, model = _service(tmp_path, url)
+    state["done_reason"] = done_reason
+    # The mock streams the *correct* arithmetic answer, but a length-capped
+    # or aborted response cannot prove a complete bounded generation.
+    result = service.qualify(model["id"], run_inference=True, timeout_seconds=3, max_tokens=8)
+    assert result["status"] == "failed"
+    assert result["reason"] == "stream_failed_or_incomplete"
+    assert result["inference_tested"] is False
+    assert service.qualification(model["id"]) == result
 
 
 def test_opt_in_rejects_remote_unlisted_and_bad_limits_without_generating(tmp_path, local_ollama):

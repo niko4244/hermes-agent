@@ -143,6 +143,11 @@ def _stream_chat(opener: Any, origin: str, model: str, max_tokens: int, timeout_
     elapsed = time.monotonic() - started
     if not seen_done:
         raise ValueError("incomplete_stream")
+    # Ollama sets done=true even when num_predict cut off the response.
+    # A partial result may coincidentally equal the expected answer, but it
+    # cannot be accepted as a complete, qualified response.
+    if last.get("done_reason") not in (None, "stop"):
+        raise ValueError("truncated_or_aborted_generation")
     token_count = _positive_int(last.get("eval_count"))
     if token_count is not None and token_count > max_tokens:
         raise ValueError("server_exceeded_max_tokens")

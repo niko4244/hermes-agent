@@ -11,8 +11,9 @@ import os
 import re
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 from hermes_constants import get_hermes_home
 
@@ -138,12 +139,21 @@ class ModelService:
         self._hardware: dict | None = None
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         if self.db_path.is_symlink():
             raise ValueError("refusing symlinked model registry")
         connection = sqlite3.connect(self.db_path, timeout=5)
-        connection.execute("PRAGMA busy_timeout=5000")
-        return connection
+        try:
+            connection.execute("PRAGMA busy_timeout=5000")
+            # sqlite3.Connection.__exit__ commits/rolls back but does not
+            # close the handle. This must close deterministically: gateway RPCs
+            # create short-lived instances and Windows locks even an unused
+            # registry database until the connection is finalized by the GC.
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         if self.home.is_symlink():
