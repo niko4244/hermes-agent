@@ -57,8 +57,9 @@ def selected_profile_main_override(service: Any = None) -> dict | None:
         return None
     model = service.resolve("main")
     if model is None:
-        if settings.get("mode") == "auto" and not stored.get("policy"):
-            return None  # no local candidate: ordinary Hermes provider behavior
+        # A saved auto choice is an explicit opt-in to registry-based routing.
+        # With no approved local candidate, never silently fall back to the
+        # previous (potentially billable) global default.
         raise ValueError("selected main model is currently unavailable under the active routing policy")
     return main_model_override(model)
 
@@ -110,3 +111,67 @@ def approved_main_fallbacks_for_ids(
             raise ValueError("main fallback violates local-only routing")
         result.append(_credentials_for_model(row, None, _resolve_delegation_credentials))
     return result
+
+
+def enforce_main_turn_policy(agent: Any, session: dict, service: Any = None) -> None:
+    """Check active profile restrictions before a main-agent inference turn.
+
+    A new policy may be activated while a session stays open. Recheck the
+    current runtime after queued switches and config synchronization so a
+    local-only/cost-capped profile cannot authorize a previously pinned cloud
+    agent merely because its runtime was built under an older profile.
+    """
+    if service is None:
+        from hermes_cli.universal_models.service import ModelService
+
+        service = ModelService()
+    # Read the active profile directly. Scanning configured/disk model roots
+    # on *every* turn would add unrelated I/O and latency to ordinary chats.
+    active_profile = service.profile("export")
+    policy = active_profile.get("policy") or {}
+    if not policy:
+        return
+
+    runtime_model = str(getattr(agent, "model", "") or "")
+    runtime_provider = str(getattr(agent, "provider", "") or "")
+    runtime_endpoint = str(getattr(agent, "base_url", "") or "")
+    override = session.get("model_override")
+
+    if policy.get("local_only"):
+        verified_local = (
+            isinstance(override, dict)
+            and override.get("_universal_local") is True
+            and override.get("model") == runtime_model
+            and override.get("provider") == runtime_provider == "custom"
+            and override.get("base_url") == runtime_endpoint
+            and _loopback_endpoint(runtime_endpoint)
+            and getattr(agent, "api_key", None) == "local"
+        )
+        if not verified_local:
+            raise ValueError("Active profile requires an approved local model before inference")
+
+    if "max_input_cost_per_million" in policy or "max_output_cost_per_million" in policy:
+        state = service.status(refresh=False)
+        # Only provider-verified pricing can satisfy a cap. A zero price is not
+        # inferred from a loopback address or absent price metadata.
+        candidate = next((row for row in state.get("models", []) if
+                          row.get("model") == runtime_model
+                          and row.get("provider") == runtime_provider
+                          and (not row.get("endpoint") or row.get("endpoint") == runtime_endpoint)), None)
+        if candidate is None or not service._allowed(candidate, policy, frozenset(), None):
+            raise ValueError("Active profile cost limit cannot verify this model's price")
+
+    # Provider fallback is executed later inside Hermes' conversation loop.
+    # Reconcile its chain with *current* policy here, otherwise a local agent
+    # created under an older profile can silently fail over to a paid provider
+    # after local-only is enabled during an unrelated turn.
+    saved_main = next((role for role in active_profile.get("roles", [])
+                       if role.get("role") == "main"), None)
+    saved_ids = (saved_main.get("fallback_ids") or []) if saved_main and saved_main.get("mode") == "pinned" else []
+    old_chain = getattr(agent, "_fallback_chain", None) or []
+    if old_chain or saved_ids:
+        authorized = approved_main_fallbacks_for_ids(service, saved_ids) if saved_ids else []
+        if old_chain != authorized:
+            agent._fallback_chain = authorized
+            agent._fallback_index = 0
+            agent._unavailable_fallback_keys = set()

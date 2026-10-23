@@ -2182,6 +2182,18 @@ def _start_agent_build(sid: str, session: dict) -> None:
             # Session DB row deferred to first run_conversation() call.
             # pending_title applied post-first-message (see cli.exec handler).
             current["agent"] = agent
+            # Profile-based local routing is supplied through kw for lazy
+            # construction, and must also be retained in the session state.
+            # The per-turn policy guard uses this exact source provenance to
+            # distinguish a verified Ollama runtime from a generic proxy.
+            # Preserve any explicit model choice made while build was pending.
+            built_override = kw.get("model_override")
+            if (
+                isinstance(built_override, dict)
+                and built_override.get("_universal_local")
+                and not current.get("model_override")
+            ):
+                current["model_override"] = built_override
             # Baseline for the per-turn config sync; the profile home
             # override is still active here.
             current["config_model_seen"] = _config_model_target()
@@ -4513,6 +4525,7 @@ def _apply_model_switch(
                 f"Model switch to {result.new_model} failed ({exc}); "
                 f"staying on {getattr(agent, 'model', current_model)}."
             ) from exc
+        agent._universal_local = False
         _restart_slash_worker(sid, session)
         _persist_live_session_runtime(session)
         _persist_live_session_system_prompt(session)
@@ -4689,6 +4702,7 @@ def _apply_universal_local_switch(
         # Never keep a preexisting global cloud fallback by accident.
         agent._fallback_chain = approved_fallbacks
         agent._fallback_index = 0
+        agent._universal_local = True
         _restart_slash_worker(sid, session)
         _persist_live_session_runtime(session)
         _append_model_switch_marker(session, model=runtime["model"], provider="custom")
@@ -6530,7 +6544,7 @@ def _make_agent(
         from tui_gateway.universal_model_runtime import selected_profile_main_fallbacks
 
         selected_fallbacks = selected_profile_main_fallbacks()
-    return AIAgent(
+    built_agent = AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 500),
         provider=runtime.get("provider"),
@@ -6581,6 +6595,10 @@ def _make_agent(
         ),
         **_agent_cbs(sid),
     )
+    built_agent._universal_local = bool(
+        isinstance(model_override, dict) and model_override.get("_universal_local")
+    )
+    return built_agent
 
 
 def _init_session(
@@ -9492,6 +9510,10 @@ def _run_prompt_submit(
     _emit("message.start", sid)
 
     def run():
+        # Policy checks can refuse a request before the history snapshot is
+        # taken. The finally block still clears this buffer and must always
+        # reach session.running=False and context-token cleanup on refusal.
+        history: list = []
         approval_token = None
         session_tokens = []
         home_token = None  # per-turn HERMES_HOME override for a resumed remote profile
@@ -9552,6 +9574,12 @@ def _run_prompt_submit(
                 # config sync so an explicit pick wins over a config.yaml change.
                 _apply_pending_model_switch(sid, session)
                 _sync_agent_model_with_config(sid, session)
+            # A profile's local-only or price limit may have changed while
+            # this session remained alive. Apply the new restriction before
+            # any model call, even when the user has not switched models.
+            from tui_gateway.universal_model_runtime import enforce_main_turn_policy
+
+            enforce_main_turn_policy(agent, session)
             # Snapshot after turn-start model sync. A deferred switch mutates
             # history and its version; that mutation belongs to this turn.
             with session["history_lock"]:

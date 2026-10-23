@@ -74,6 +74,16 @@ def test_display_only_auto_role_does_not_change_existing_provider():
     assert fallbacks is None
 
 
+def test_saved_auto_role_with_no_local_model_cannot_use_paid_parent_defaults():
+    paid_parent = {"model": "paid", "provider": "openrouter", "base_url": "https://openrouter.ai/api/v1"}
+    saved_auto = assigned(mode="auto")
+    with pytest.raises(ValueError, match="no approved model"):
+        delegation_model_route(
+            "leaf", paid_parent, SimpleNamespace(), cloud_resolver,
+            service=Registry(row=None, role=saved_auto, local_only=False),
+        )
+
+
 def test_local_openai_compatible_model_uses_own_sentinel_never_parent_key():
     local = {
         "id": "custom/local/mistral",

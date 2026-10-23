@@ -95,11 +95,11 @@ def delegation_model_route(
     if selected is None:
         if settings.get("mode") == "pinned":
             raise ValueError(f"pinned model for {assignment_role} is unavailable")
-        # Automatic routing with no safe candidate must not silently select a
-        # cloud service when the policy explicitly constrained local routing.
-        if state.get("local_only") or settings.get("local_only") or state.get("policy"):
-            raise ValueError(f"no approved model under the active routing policy for {assignment_role}")
-        return defaults, None
+        # An explicitly saved auto assignment asks the registry to choose a
+        # model. The registry chooses only permitted candidates; falling back
+        # to an inherited paid-cloud default would violate that assignment
+        # even when the profile has no additional spending policy.
+        raise ValueError(f"no approved model under the active routing policy for {assignment_role}")
 
     result = _credentials_for_model(selected, parent_agent, credential_resolver)
     known = {m.get("id"): m for m in state.get("models", []) if isinstance(m, dict)}

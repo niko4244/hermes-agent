@@ -2,11 +2,13 @@
 
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+import threading
 
 import pytest
 
 from tui_gateway import server
 from tui_gateway.universal_model_runtime import (
+    enforce_main_turn_policy,
     main_model_override,
     selected_profile_main_fallbacks,
     selected_profile_main_override,
@@ -41,10 +43,113 @@ def test_explicit_auto_role_can_select_local_but_never_auto_uses_cloud_when_abse
     service.resolve.return_value = local_row()
     assert selected_profile_main_override(service)["model"] == "small"
     service.resolve.return_value = None
-    assert selected_profile_main_override(service) is None
+    with pytest.raises(ValueError, match="routing policy"):
+        selected_profile_main_override(service)
     service.profile.return_value["policy"] = {"local_only": True}
     with pytest.raises(ValueError, match="routing policy"):
         selected_profile_main_override(service)
+
+
+def test_local_only_policy_rejects_existing_cloud_before_next_main_turn():
+    service = Mock()
+    service.profile.return_value = {"policy": {"local_only": True}}
+    service.status.return_value = {"policy": {"local_only": True}, "models": []}
+    cloud = SimpleNamespace(
+        model="paid", provider="openrouter", base_url="https://openrouter.ai/api/v1",
+        api_key="private-token",
+    )
+    with pytest.raises(ValueError, match="approved local model"):
+        enforce_main_turn_policy(cloud, {"model_override": {"model": "paid"}}, service)
+
+
+def test_local_only_allows_unchanged_verified_direct_ollama_session():
+    service = Mock()
+    service.profile.return_value = {"policy": {"local_only": True}}
+    service.status.return_value = {"policy": {"local_only": True}, "models": [local_row()]}
+    local_agent = SimpleNamespace(
+        model="small", provider="custom", base_url="http://127.0.0.1:11434/v1", api_key="local",
+    )
+    enforce_main_turn_policy(local_agent, {"model_override": main_model_override(local_row())}, service)
+    local_agent.base_url = "https://local-proxy.example/v1"
+    with pytest.raises(ValueError, match="approved local model"):
+        enforce_main_turn_policy(local_agent, {"model_override": main_model_override(local_row())}, service)
+
+
+def test_budget_cap_fails_closed_on_unverified_price_for_active_local_model():
+    service = Mock()
+    service.profile.return_value = {"policy": {"max_output_cost_per_million": 1}}
+    service.status.return_value = {"policy": {"max_output_cost_per_million": 1}, "models": [local_row()]}
+    service._allowed.return_value = False
+    agent = SimpleNamespace(
+        model="small", provider="custom", base_url="http://127.0.0.1:11434/v1", api_key="local",
+    )
+    with pytest.raises(ValueError, match="cannot verify"):
+        enforce_main_turn_policy(agent, {"model_override": main_model_override(local_row())}, service)
+
+
+def test_live_local_only_policy_strips_existing_paid_fallback_before_inference():
+    service = Mock()
+    service.profile.return_value = {"roles": [], "policy": {"local_only": True}}
+    agent = SimpleNamespace(
+        model="small", provider="custom", base_url="http://127.0.0.1:11434/v1", api_key="local",
+        _fallback_chain=[{"provider": "openrouter", "model": "paid", "api_key": "old-secret"}],
+        _fallback_index=1,
+    )
+    enforce_main_turn_policy(agent, {"model_override": main_model_override(local_row())}, service)
+    assert agent._fallback_chain == []
+    assert agent._fallback_index == 0
+
+
+def test_profile_approved_local_fallback_retained_under_local_only():
+    fb = {**local_row("spare"), "id": "local:spare"}
+    service = Mock()
+    service.profile.return_value = {"roles": [{"role": "main", "mode": "pinned", "fallback_ids": [fb["id"]]}],
+                                    "policy": {"local_only": True}}
+    service.status.return_value = {"models": [fb], "policy": {"local_only": True}, "local_only": True}
+    service._allowed.return_value = True
+    agent = SimpleNamespace(
+        model="small", provider="custom", base_url="http://127.0.0.1:11434/v1", api_key="local",
+        _fallback_chain=[{"provider": "openrouter", "model": "paid"}],
+        _fallback_index=0,
+    )
+    enforce_main_turn_policy(agent, {"model_override": main_model_override(local_row())}, service)
+    assert [item["model"] for item in agent._fallback_chain] == ["spare"]
+    assert agent._fallback_chain[0]["api_key"] == "local"
+
+
+def test_pre_history_policy_refusal_finishes_gateway_turn_without_leaving_busy(monkeypatch, tmp_path):
+    """A blocked cloud turn must close normally even before `history` exists."""
+    from tests.tui_gateway.test_failed_turn_retention import _InlineThread
+
+    agent = SimpleNamespace(
+        model="paid", provider="openrouter", base_url="https://openrouter.ai/api/v1",
+        api_key="opaque", session_id="local-test", run_conversation=Mock(),
+        clear_interrupt=lambda: None,
+    )
+    session = {
+        "agent": agent, "session_key": "local-test", "history": [],
+        "history_lock": threading.Lock(), "history_version": 0,
+        "inflight_turn": None, "running": True, "attached_images": [],
+    }
+    monkeypatch.setattr(server.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(server, "record_turn_start", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "_retire_turn_marker", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "_session_home", lambda *args: tmp_path)
+    monkeypatch.setattr(server, "_wire_callbacks", lambda sid: None)
+    monkeypatch.setattr(server, "_set_session_context", lambda *a, **kw: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda *a: None)
+    monkeypatch.setattr(server, "_sync_agent_model_with_config", lambda *a: None)
+    monkeypatch.setattr(server, "_emit_settled_session_info", lambda *a: None)
+    monkeypatch.setattr(server, "_drain_queued_prompt", lambda *a: False)
+    monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
+    monkeypatch.setattr(server, "_CRASH_LOG", str(tmp_path / "crash.log"))
+
+    with patch("tui_gateway.universal_model_runtime.enforce_main_turn_policy",
+               side_effect=ValueError("local-only routing refused")):
+        server._run_prompt_submit("rid", "sid", session, "this must not be sent")
+    agent.run_conversation.assert_not_called()
+    assert session["running"] is False
+    assert session["inflight_turn"]["status"] == "error"
 
 
 def test_non_ollama_local_proxy_and_unreachable_rows_are_not_routed_with_local_key():

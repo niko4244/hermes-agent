@@ -72,8 +72,11 @@ role policy retains existing behavior.
 
 An explicitly saved `auto` assignment chooses from verified local Ollama
 models in deterministic order when no model is pinned. Unconfigured/default
-role labels do not change the previous provider behavior. A pinned model is
-never silently replaced with its configured fallback before a real request.
+role labels do not change the previous provider behavior. If the operator has
+explicitly saved `auto` but no approved model is available, main/delegated
+runtime resolution fails closed instead of reverting to a billable legacy
+provider. A pinned model is never silently replaced with its configured
+fallback before a real request.
 
 New-session `main` pins use the same Hermes agent construction path. For live
 native Ollama session switches, the gateway invokes the established
@@ -81,6 +84,17 @@ native Ollama session switches, the gateway invokes the established
 fallback chain; an empty chain cannot inherit a cloud fallback.
 During an active turn, the switch queues for the next safe turn boundary.
 The user can continue using `/model` for explicitly configured providers.
+
+The TUI gateway checks the active local-only and pricing limits again at
+**each turn boundary**, before it submits an inference request. This prevents
+a previously open cloud session from bypassing a newly activated local-only
+profile. If an older local session retains a cloud fallback, the guard replaces
+that chain with only the now-approved explicit profile fallbacks, or clears it.
+When the active model or fallback price cannot be verified under a price cap,
+the turn is refused and its session is released normally. These controls
+currently cover the native TUI main turn and delegated agent creation;
+providers invoked through other existing Hermes surfaces require their own
+policy integration.
 
 ## Troubleshooting and limitations
 
@@ -125,6 +139,11 @@ Ollama-reported eval count and duration. This is **one warm-model observation**
 and does not establish performance for other prompts or hardware. A previous
 attempt while the model was unloaded correctly returned
 `model_not_already_loaded` without starting inference.
+
+A second live validation applied an active `local_only=true` profile before
+constructing the Hermes main agent. Its policy guard approved the selected
+`llama3.2:3b` runtime with zero fallback entries, and the real agent returned
+`LOCAL_POLICY_OK` after exactly one local inference call.
 
 ## Validation
 
