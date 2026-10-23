@@ -62,6 +62,18 @@ def test_local_only_policy_rejects_existing_cloud_before_next_main_turn():
         enforce_main_turn_policy(cloud, {"model_override": {"model": "paid"}}, service)
 
 
+def test_explicit_disabled_local_only_keeps_legacy_cloud_fallbacks():
+    service = Mock()
+    service.profile.return_value = {"policy": {"local_only": False}, "roles": []}
+    agent = SimpleNamespace(
+        model="legacy", provider="openrouter", base_url="https://openrouter.ai/api/v1",
+        _fallback_chain=[{"provider": "anthropic", "model": "legacy-fallback"}],
+    )
+    enforce_main_turn_policy(agent, {}, service)
+    assert agent._fallback_chain == [{"provider": "anthropic", "model": "legacy-fallback"}]
+    service.status.assert_not_called()
+
+
 def test_local_only_allows_unchanged_verified_direct_ollama_session():
     service = Mock()
     service.profile.return_value = {"policy": {"local_only": True}}

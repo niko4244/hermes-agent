@@ -129,7 +129,11 @@ def enforce_main_turn_policy(agent: Any, session: dict, service: Any = None) -> 
     # on *every* turn would add unrelated I/O and latency to ordinary chats.
     active_profile = service.profile("export")
     policy = active_profile.get("policy") or {}
-    if not policy:
+    if not (policy.get("local_only") is True or
+            "max_input_cost_per_million" in policy or
+            "max_output_cost_per_million" in policy):
+        # A user choosing local_only=False has *disabled* the restriction.
+        # Preserve the host's legacy provider/fallback behavior in that case.
         return
 
     runtime_model = str(getattr(agent, "model", "") or "")
