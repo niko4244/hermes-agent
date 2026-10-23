@@ -230,11 +230,38 @@ def _with_inherited_fallback(route: dict[str, Any], config: Mapping[str, Any]) -
     return route if inherited is None else {**route, "fallback_providers": inherited}
 
 
-def _resolve_route(route: dict[str, Any], parent_agent: Any, backend: str) -> TaskRoute:
+def _child_model_role(parent_agent: Any) -> str:
+    """Use exactly the depth-derived role `_build_child_agent` will grant."""
+    from tools.delegate_tool import _get_max_spawn_depth, _get_orchestrator_enabled
+
+    depth = getattr(parent_agent, "_delegate_depth", 0) + 1
+    return "orchestrator" if _get_orchestrator_enabled() and depth < _get_max_spawn_depth() else "leaf"
+
+
+def _route_pins_model(route: Mapping[str, Any]) -> bool:
+    """Provider/per-task decisions outrank the optional saved role assignment."""
+    return any(route.get(name) not in (None, "") for name in ("model", "provider", "base_url", "api_key"))
+
+
+def _resolve_route(route: dict[str, Any], parent_agent: Any, backend: str,
+                   *, explicit_fallback: Any = None) -> TaskRoute:
     if route.get("profile"):
         return replace(_profile_route(_profile_home(route["profile"])), backend=backend)
     from tools.delegate_tool import _resolve_delegation_credentials  # the facade is the patch seam
     creds = _resolve_delegation_credentials(route, parent_agent)
+    if not _route_pins_model(route):
+        from tools.delegation_model_router import delegation_model_route
+
+        creds, saved_chain = delegation_model_route(
+            _child_model_role(parent_agent), creds, parent_agent, _resolve_delegation_credentials,
+            declared_fallback=explicit_fallback,
+        )
+        if saved_chain is not None:
+            route = {**route, "fallback_providers": saved_chain}
+    else:
+        from tools.delegation_model_router import enforce_explicit_route_policy
+
+        enforce_explicit_route_policy(creds, parent_agent, route)
     if route.get("service_tier") not in (None, ""):
         from tools.delegate_tool_tuning import task_service_tier
         creds = {**creds, **task_service_tier(str(route["service_tier"]), creds, parent_agent)}
@@ -244,11 +271,12 @@ def _resolve_route(route: dict[str, Any], parent_agent: Any, backend: str) -> Ta
 def _route_to_task_route(route: dict[str, Any], parent_agent: Any, cache: dict[str, TaskRoute],
                          config: Optional[Mapping[str, Any]] = None, backend: str = "default") -> TaskRoute:
     label = route.get("label") if isinstance(route.get("label"), str) else None
+    explicit_fallback = route.get("fallback_providers")
     route = _with_inherited_fallback(route, config or {})
     # The label is display-only: two labels on one route (or one profile) resolve once.
     key = json.dumps({k: v for k, v in route.items() if k != "label"}, sort_keys=True, default=str)
     if key not in cache:
-        cache[key] = _resolve_route(route, parent_agent, backend)
+        cache[key] = _resolve_route(route, parent_agent, backend, explicit_fallback=explicit_fallback)
     return replace(cache[key], label=label)
 
 
