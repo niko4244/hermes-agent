@@ -4,17 +4,31 @@ import { useEffect, useRef, useState } from 'react'
 import type {
   OrchestrationAssignResult,
   OrchestrationModel,
+  OrchestrationPolicy,
   OrchestrationProfile,
+  OrchestrationQualificationResult,
   OrchestrationRole,
   OrchestrationStatus
 } from '../domain/orchestration.js'
 import {
   buildOrchestrationAssignment,
+  availabilityLabel,
   capabilityNames,
   filterOrchestrationModels,
   isOrchestrationStatus,
+  isDirectLocalModel,
+  isVerifiedQualification,
+  modelCostLabel,
   modelLabel,
   moveOrchestrationFallback,
+  nextPolicy,
+  parsePriceCap,
+  policySummary,
+  priceLimitLabel,
+  qualificationProvenance,
+  qualificationReasonLabel,
+  qualificationRequest,
+  qualificationSummary,
   roleIndexAfterRefresh,
   toggleOrchestrationFallback
 } from '../domain/orchestration.js'
@@ -28,8 +42,22 @@ import { chipRowProps, clampOverlayWidth } from './overlayPrimitives.js'
 const MAX_WIDTH = 100
 const VISIBLE = 10
 
-type Stage = 'roles' | 'models' | 'fallbacks' | 'profiles' | 'search' | 'save' | 'create-role'
-const TABS: readonly Stage[] = ['roles', 'models', 'profiles']
+type Stage =
+  | 'roles'
+  | 'models'
+  | 'fallbacks'
+  | 'profiles'
+  | 'policy'
+  | 'search'
+  | 'save'
+  | 'create-role'
+  | 'cap-input'
+  | 'policy-confirm'
+  | 'qualify-confirm'
+const TABS: readonly Stage[] = ['roles', 'models', 'profiles', 'policy']
+const POLICY_FIELDS = ['local_only', 'max_input_cost_per_million', 'max_output_cost_per_million'] as const
+const QUALIFY_TOKEN_OPTIONS = [16, 32, 64]
+const QUALIFY_TIMEOUT_OPTIONS = [10, 20, 30]
 
 interface OrchestrationOverlayProps {
   gw: GatewayClient
@@ -46,6 +74,14 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
   const [roleIdx, setRoleIdx] = useState(0)
   const [modelIdx, setModelIdx] = useState(0)
   const [profileIdx, setProfileIdx] = useState(0)
+  const [policyIdx, setPolicyIdx] = useState(0)
+  const [draftCap, setDraftCap] = useState('')
+  const [pendingPolicy, setPendingPolicy] = useState<OrchestrationPolicy | null>(null)
+  const [qualifyTarget, setQualifyTarget] = useState<OrchestrationModel | null>(null)
+  const [qualifyTokens, setQualifyTokens] = useState(32)
+  const [qualifyTimeout, setQualifyTimeout] = useState(20)
+  const [qualification, setQualification] = useState<OrchestrationQualificationResult | null>(null)
+  const [qualifying, setQualifying] = useState(false)
   const [query, setQuery] = useState('')
   const [draftName, setDraftName] = useState('')
   const [draftRole, setDraftRole] = useState('')
@@ -130,6 +166,8 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
   const activeRole: OrchestrationRole | undefined = roles[Math.min(roleIdx, roles.length - 1)]
   const activeModel: OrchestrationModel | undefined = models[Math.min(modelIdx, models.length - 1)]
   const activeProfile: OrchestrationProfile | undefined = profiles[Math.min(profileIdx, profiles.length - 1)]
+  const policy = data?.policy
+  const policyField = POLICY_FIELDS[policyIdx] ?? POLICY_FIELDS[0]
   const selectedModelName = (id?: string | null): string => {
     if (!id) {
       return 'automatic'
@@ -186,6 +224,77 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
     )
   }
 
+  const proposePolicy = (field: (typeof POLICY_FIELDS)[number], value: boolean | number | null) => {
+    if (!policy) {
+      setError('Policy is not available from the gateway. Refresh with r and check the backend version.')
+
+      return
+    }
+
+    try {
+      setPendingPolicy(nextPolicy(policy, field, value))
+      setError('')
+      setStage('policy-confirm')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Invalid policy value.')
+    }
+  }
+
+  const qualify = (model: OrchestrationModel) => {
+    if (busy || !isDirectLocalModel(model)) {
+      setError(
+        'Qualification is restricted to live direct local Ollama models. Refresh with r; other proxies might incur cloud costs.'
+      )
+
+      return
+    }
+
+    let params: ReturnType<typeof qualificationRequest>
+    try {
+      params = qualificationRequest(model, qualifyTokens, qualifyTimeout)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Invalid qualification limits.')
+
+      return
+    }
+
+    setBusy(true)
+    setQualifying(true)
+    setError('')
+    setNotice('')
+    setQualification(null)
+    gw.request<OrchestrationQualificationResult>('orchestration.qualify', params)
+      .then(result => {
+        if (!result || result.model_id !== model.id) {
+          setError('Qualification response did not identify the requested model; no result accepted.')
+
+          return
+        }
+
+        setQualification(result)
+        if (isVerifiedQualification(result)) {
+          setNotice(`Local inference probe passed for ${modelLabel(model)}.`)
+        } else if (result.inference_tested !== true) {
+          setError(
+            'Only metadata or reachability was checked; inference is NOT qualified. Verify model loading and backend probe support.'
+          )
+        } else {
+          setError(
+            'Inference was attempted, but no passing result was confirmed. Inspect the result and local server before retrying.'
+          )
+        }
+      })
+      .catch((reason: unknown) =>
+        setError(`Local qualification failed: ${rpcErrorMessage(reason)}. Check Ollama and try r to refresh.`)
+      )
+      .finally(() => {
+        setBusy(false)
+        setQualifying(false)
+        setQualifyTarget(null)
+        setStage('models')
+      })
+  }
+
   const back = () => {
     if (stage === 'search') {
       setStage('models')
@@ -207,6 +316,21 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
       return
     }
 
+    if (stage === 'cap-input' || stage === 'policy-confirm') {
+      setDraftCap('')
+      setPendingPolicy(null)
+      setStage('policy')
+
+      return
+    }
+
+    if (stage === 'qualify-confirm') {
+      setQualifyTarget(null)
+      setStage('models')
+
+      return
+    }
+
     if (stage === 'models' || stage === 'fallbacks') {
       setStage('roles')
       setQuery('')
@@ -220,6 +344,68 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
 
   useInput((ch, key) => {
     if (busy) {
+      return
+    }
+
+    if (stage === 'policy-confirm') {
+      if (key.escape || ch === 'n') {
+        back()
+      } else if (ch === 'y' && pendingPolicy) {
+        mutate('orchestration.policy', { action: 'set', policy: pendingPolicy }, 'saved active profile policy', () => {
+          setPendingPolicy(null)
+          setStage('policy')
+        })
+      }
+
+      return
+    }
+
+    if (stage === 'qualify-confirm') {
+      if (key.escape || ch === 'n') {
+        back()
+      } else if (ch === '[' || ch === ']') {
+        setQualifyTokens(current => {
+          const index = QUALIFY_TOKEN_OPTIONS.indexOf(current)
+          return (
+            QUALIFY_TOKEN_OPTIONS[
+              Math.max(0, Math.min(QUALIFY_TOKEN_OPTIONS.length - 1, index + (ch === '[' ? -1 : 1)))
+            ] ?? current
+          )
+        })
+      } else if (ch === '-' || ch === '+') {
+        setQualifyTimeout(current => {
+          const index = QUALIFY_TIMEOUT_OPTIONS.indexOf(current)
+          return (
+            QUALIFY_TIMEOUT_OPTIONS[
+              Math.max(0, Math.min(QUALIFY_TIMEOUT_OPTIONS.length - 1, index + (ch === '-' ? -1 : 1)))
+            ] ?? current
+          )
+        })
+      } else if (ch === 'y' && qualifyTarget) {
+        qualify(qualifyTarget)
+      }
+
+      return
+    }
+
+    if (stage === 'cap-input') {
+      if (key.escape) {
+        back()
+      } else if (key.return) {
+        const value = parsePriceCap(draftCap)
+        if (value === null) {
+          setError(
+            'Enter a nonnegative USD cap per million tokens (up to $1,000,000; max 6 decimals), or Esc and c to clear.'
+          )
+        } else if (policyField !== 'local_only') {
+          proposePolicy(policyField, value)
+        }
+      } else if (key.backspace || key.delete) {
+        setDraftCap(value => value.slice(0, -1))
+      } else if (/^[0-9.]$/.test(ch) && draftCap.length < 24 && !key.ctrl && !key.meta) {
+        setDraftCap(value => value + ch)
+      }
+
       return
     }
 
@@ -305,9 +491,24 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
       return
     }
 
-    const length = stage === 'roles' ? roles.length : stage === 'profiles' ? profiles.length : models.length
-    const idx = stage === 'roles' ? roleIdx : stage === 'profiles' ? profileIdx : modelIdx
-    const updateIdx = stage === 'roles' ? setRoleIdx : stage === 'profiles' ? setProfileIdx : setModelIdx
+    const length =
+      stage === 'roles'
+        ? roles.length
+        : stage === 'profiles'
+          ? profiles.length
+          : stage === 'policy'
+            ? POLICY_FIELDS.length
+            : models.length
+    const idx =
+      stage === 'roles' ? roleIdx : stage === 'profiles' ? profileIdx : stage === 'policy' ? policyIdx : modelIdx
+    const updateIdx =
+      stage === 'roles'
+        ? setRoleIdx
+        : stage === 'profiles'
+          ? setProfileIdx
+          : stage === 'policy'
+            ? setPolicyIdx
+            : setModelIdx
 
     if (stage === 'fallbacks' && key.shift && (key.upArrow || key.downArrow) && activeModel) {
       setFallbackDraft(existing => moveOrchestrationFallback(existing, activeModel.id, key.upArrow ? -1 : 1))
@@ -367,6 +568,25 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
       return
     }
 
+    if (stage === 'policy') {
+      if (key.return || ch === ' ') {
+        if (policyField === 'local_only') {
+          proposePolicy('local_only', policy?.local_only !== true)
+        } else if (policy) {
+          const existing = policy[policyField]
+          setDraftCap(existing === undefined ? '' : String(existing))
+          setError('')
+          setStage('cap-input')
+        } else {
+          setError('Policy unavailable; refresh with r or update the gateway.')
+        }
+      } else if (ch === 'c' && policyField !== 'local_only') {
+        proposePolicy(policyField, null)
+      }
+
+      return
+    }
+
     if (ch === '/') {
       setStage('search')
 
@@ -376,6 +596,17 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
     if (stage === 'models') {
       if (key.return && activeModel) {
         assign('pinned', activeModel.id, undefined, () => setStage('roles'))
+      } else if (ch === 'v' && activeModel) {
+        if (!isDirectLocalModel(activeModel)) {
+          setError(
+            'Not a confirmed direct local Ollama model. Qualification is disabled for cloud providers, proxies, disk-only or stale models.'
+          )
+        } else {
+          setQualifyTarget(activeModel)
+          setQualification(null)
+          setError('')
+          setStage('qualify-confirm')
+        }
       }
 
       return
@@ -397,11 +628,28 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
         ? 'profiles'
         : stage === 'fallbacks' || stage === 'create-role'
           ? 'roles'
-          : stage
+          : stage === 'cap-input' || stage === 'policy-confirm'
+            ? 'policy'
+            : stage === 'qualify-confirm'
+              ? 'models'
+              : stage
   const title = `[${TABS.map(tab => (tab === tabName ? tab.toUpperCase() : tab)).join(' · ')}]`
-  const list = stage === 'roles' ? roles : stage === 'profiles' || stage === 'save' ? profiles : models
+  const list =
+    stage === 'roles' || stage === 'create-role'
+      ? roles
+      : stage === 'profiles' || stage === 'save'
+        ? profiles
+        : stage === 'policy' || stage === 'cap-input' || stage === 'policy-confirm'
+          ? [...POLICY_FIELDS]
+          : models
   const cursor = Math.min(
-    stage === 'roles' ? roleIdx : stage === 'profiles' ? profileIdx : modelIdx,
+    stage === 'roles' || stage === 'create-role'
+      ? roleIdx
+      : stage === 'profiles' || stage === 'save'
+        ? profileIdx
+        : stage === 'policy' || stage === 'cap-input' || stage === 'policy-confirm'
+          ? policyIdx
+          : modelIdx,
     Math.max(0, list.length - 1)
   )
   const { items, offset } = windowItems([...list], cursor, VISIBLE)
@@ -417,6 +665,13 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
           {allModels.length} models · {roles.length} roles · active profile: {data.active_profile || 'default'}
         </Text>
       )}
+      {data && (
+        <Text color={t.color.label} wrap="truncate-end">
+          Policy: local only {policy?.local_only === true ? 'ON' : policy ? 'OFF' : 'unavailable'} · caps: input{' '}
+          {priceLimitLabel(policy?.max_input_cost_per_million)}, output{' '}
+          {priceLimitLabel(policy?.max_output_cost_per_million)}
+        </Text>
+      )}
       {loading && <Text color={t.color.muted}>loading model inventory…</Text>}
       {error && (
         <Text color={t.color.error} wrap="truncate-end">
@@ -428,9 +683,52 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
           {notice}
         </Text>
       )}
-      {busy && <Text color={t.color.accent}>saving configuration…</Text>}
+      {busy && (
+        <Text color={t.color.accent}>
+          {qualifying ? 'running opt-in local inference probe…' : 'saving configuration…'}
+        </Text>
+      )}
       {stage === 'save' && <Text color={t.color.text}>Save current assignments as profile: {draftName || '▌'}</Text>}
       {stage === 'create-role' && <Text color={t.color.text}>Agent role name: {draftRole || '▌'}</Text>}
+      {stage === 'cap-input' && (
+        <Text color={t.color.text}>
+          USD per 1M {policyField === 'max_input_cost_per_million' ? 'input' : 'output'} tokens: {draftCap || '▌'}
+        </Text>
+      )}
+      {stage === 'policy' && (
+        <Text color={t.color.label}>Active profile routing guardrails · {policySummary(policy)}</Text>
+      )}
+      {stage === 'policy' && (
+        <Text color={t.color.muted}>
+          Unverified model prices cannot satisfy a price cap; limits may block routes even for local models.
+        </Text>
+      )}
+      {stage === 'policy-confirm' && pendingPolicy && (
+        <Box flexDirection="column">
+          <Text bold color={t.color.accent}>
+            Confirm active profile policy change?
+          </Text>
+          <Text color={t.color.label}>Proposed: {policySummary(pendingPolicy)}</Text>
+          <Text color={t.color.muted}>
+            Changing these limits can permit billable model routing. y save · n/Esc cancel
+          </Text>
+        </Box>
+      )}
+      {stage === 'qualify-confirm' && qualifyTarget && (
+        <Box flexDirection="column">
+          <Text bold color={t.color.accent}>
+            Run a real local inference qualification for {modelLabel(qualifyTarget)}?
+          </Text>
+          <Text color={t.color.label}>Model: {qualifyTarget.id} · directly observed Ollama only</Text>
+          <Text color={t.color.label}>
+            Bounded probe: {qualifyTokens} max output tokens · {qualifyTimeout}s timeout
+          </Text>
+          <Text color={t.color.muted}>
+            Requires an already-loaded model. Uses local compute only; no model pull or cloud request. y run · n/Esc
+            cancel
+          </Text>
+        </Box>
+      )}
       {stage === 'search' && <Text color={t.color.text}>Search providers/models: {query || '▌'}</Text>}
       {(stage === 'models' || stage === 'fallbacks' || stage === 'search') && activeRole && (
         <Text color={t.color.label} wrap="truncate-end">
@@ -442,6 +740,40 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
         <Text color={t.color.muted} wrap="truncate-end">
           Priority: {fallbackDraft.length ? fallbackDraft.map(selectedModelName).join(' → ') : 'none'}
         </Text>
+      )}
+      {qualification && (
+        <Box flexDirection="column">
+          <Text color={isVerifiedQualification(qualification) ? t.color.ok : t.color.muted}>
+            Qualification: {qualificationSummary(qualification)}
+          </Text>
+          <Text color={t.color.muted} wrap="truncate-end">
+            Provenance: {qualificationProvenance(qualification)}
+          </Text>
+          {qualificationReasonLabel(qualification) && (
+            <Text color={t.color.muted}>Probe: {qualificationReasonLabel(qualification)}</Text>
+          )}
+          {qualification.inference_tested === true && (
+            <Text color={t.color.muted}>
+              Single fixed arithmetic check:{' '}
+              {qualification.quality?.passed === true ? 'exact match' : 'not passed or not reported'} (not broad model
+              quality)
+            </Text>
+          )}
+          {typeof qualification.latency_ms === 'number' && Number.isFinite(qualification.latency_ms) && (
+            <Text color={t.color.muted}>Measured latency: {Math.round(qualification.latency_ms)}ms</Text>
+          )}
+          {typeof qualification.elapsed_ms === 'number' && Number.isFinite(qualification.elapsed_ms) && (
+            <Text color={t.color.muted}>
+              Elapsed: {Math.round(qualification.elapsed_ms)}ms
+              {typeof qualification.ttft_ms === 'number' && Number.isFinite(qualification.ttft_ms)
+                ? ` · first text: ${Math.round(qualification.ttft_ms)}ms`
+                : ''}
+              {typeof qualification.tokens_per_second === 'number' && Number.isFinite(qualification.tokens_per_second)
+                ? ` · ${qualification.tokens_per_second.toFixed(1)} tokens/s (Ollama reported)`
+                : ''}
+            </Text>
+          )}
+        </Box>
       )}
       {!loading && !list.length && stage !== 'save' && (
         <Text color={t.color.muted}>
@@ -457,29 +789,37 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
         const selected = cursor === offset + index
         let label = ''
 
-        if (stage === 'roles') {
+        if (stage === 'roles' || stage === 'create-role') {
           const role = item as OrchestrationRole
           label = `${role.role} · ${role.mode === 'auto' ? 'auto' : selectedModelName(role.model_id)} · ${role.fallback_ids?.length ?? 0} fallbacks`
         } else if (stage === 'profiles' || stage === 'save') {
           const profile = item as OrchestrationProfile
           label = `${profile.name}${profile.name === data?.active_profile ? ' ✓ active' : ''}`
+        } else if (stage === 'policy' || stage === 'cap-input' || stage === 'policy-confirm') {
+          const field = item as (typeof POLICY_FIELDS)[number]
+          label =
+            field === 'local_only'
+              ? `Local-only routing: ${policy?.local_only === true ? 'ON (observed direct Ollama only)' : policy ? 'OFF (cloud possible)' : 'unavailable'}`
+              : `${field === 'max_input_cost_per_million' ? 'Input' : 'Output'} USD cap: ${priceLimitLabel(policy?.[field])}`
         } else {
           const model = item as OrchestrationModel
           const selectedFallback = fallbackDraft.indexOf(model.id)
           const fallbackMark =
             stage === 'fallbacks' ? (selectedFallback >= 0 ? `[${selectedFallback + 1}] ` : '[ ] ') : ''
-          label = `${fallbackMark}${modelLabel(model)} · ${model.availability || 'unknown'}${model.source ? ` · ${model.source}` : ''}`
+          label = `${fallbackMark}${modelLabel(model)} · ${availabilityLabel(model)}${model.source ? ` · ${model.source}` : ''}`
         }
 
         return (
           <Text
             {...chipRowProps(t, selected)}
             key={
-              stage === 'roles'
+              stage === 'roles' || stage === 'create-role'
                 ? (item as OrchestrationRole).role
                 : stage === 'profiles' || stage === 'save'
                   ? (item as OrchestrationProfile).name
-                  : (item as OrchestrationModel).id
+                  : stage === 'policy' || stage === 'cap-input' || stage === 'policy-confirm'
+                    ? (item as string)
+                    : (item as OrchestrationModel).id
             }
             wrap="truncate-end"
           >
@@ -490,25 +830,43 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
       })}
       {offset + VISIBLE < list.length && <Text color={t.color.muted}>↓ {list.length - offset - VISIBLE} more</Text>}
       {(stage === 'models' || stage === 'search' || stage === 'fallbacks') && activeModel && (
-        <Text color={t.color.muted} wrap="truncate-end">
-          {activeModel.context_window ? `context ${activeModel.context_window.toLocaleString()} · ` : ''}
-          {capabilityNames(activeModel).join(', ') || 'capabilities not reported'}
-        </Text>
+        <Box flexDirection="column">
+          <Text color={t.color.muted} wrap="truncate-end">
+            {activeModel.context_window ? `reported context ${activeModel.context_window.toLocaleString()} · ` : ''}
+            {capabilityNames(activeModel).join(', ') || 'capabilities not verified'}
+          </Text>
+          <Text color={t.color.muted} wrap="truncate-end">
+            Cost: {modelCostLabel(activeModel)}
+          </Text>
+          <Text color={t.color.muted}>
+            {isDirectLocalModel(activeModel)
+              ? 'v = explicitly request local inference probe (never automatic)'
+              : 'Qualification disabled: not observed direct local Ollama'}
+          </Text>
+        </Box>
       )}
       <OverlayHint t={t}>
         {stage === 'roles'
           ? '↑↓ role · Enter models · a auto · f fallbacks · n new role · Tab section · r refresh'
           : stage === 'models'
-            ? '↑↓ choose model · Enter pin · / filter · Tab section · Esc roles · q close'
+            ? '↑↓ choose model · Enter pin · v verify local (confirm) · / filter · Tab section · Esc roles'
             : stage === 'fallbacks'
               ? '↑↓ model · Space toggle · Shift+↑↓ reorder · Enter save · Esc cancel'
               : stage === 'profiles'
                 ? '↑↓ choose profile · Enter activate · n save · Tab section · Esc/q close'
-                : stage === 'save'
-                  ? 'type profile name · Enter save · Esc cancel'
-                  : stage === 'create-role'
-                    ? 'type role name · Enter choose · Esc cancel'
-                    : 'type to filter · Enter finish · Esc finish'}
+                : stage === 'policy'
+                  ? '↑↓ policy field · Enter edit/toggle · c clear selected cap · Tab section · Esc close'
+                  : stage === 'cap-input'
+                    ? 'type nonnegative USD cap per 1M tokens · Enter review · Esc cancel'
+                    : stage === 'policy-confirm'
+                      ? 'y confirm policy write · n/Esc cancel'
+                      : stage === 'qualify-confirm'
+                        ? 'y run local-only probe · [ ] token limit · - + timeout · n/Esc cancel'
+                        : stage === 'save'
+                          ? 'type profile name · Enter save · Esc cancel'
+                          : stage === 'create-role'
+                            ? 'type role name · Enter choose · Esc cancel'
+                            : 'type to filter · Enter finish · Esc finish'}
       </OverlayHint>
     </Box>
   )
