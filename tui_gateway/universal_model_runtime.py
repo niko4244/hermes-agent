@@ -135,6 +135,8 @@ def enforce_main_turn_policy(agent: Any, session: dict, service: Any = None) -> 
     local-only/cost-capped profile cannot authorize a previously pinned cloud
     agent merely because its runtime was built under an older profile.
     """
+    if session.get("_universal_model_rollback_failed"):
+        raise ValueError("Model assignment rollback failed; rebuild the session before inference")
     if service is None:
         service = _active_registry()
         if service is None:

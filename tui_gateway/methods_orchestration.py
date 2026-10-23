@@ -26,9 +26,27 @@ def _selected_model(record: dict) -> str:
     return f"{model} --provider {provider} --session"
 
 
+def _orchestration_session_error(rid: str, params: dict) -> dict | None:
+    """Refuse a stale/mismatched scope rather than using launch HERMES_HOME.
+
+    The common profile wrapper supports legacy fallback for unknown sessions;
+    model-management requests cannot safely inherit that behavior.
+    """
+    session_id = params.get("session_id")
+    if session_id is None and ("session_id" not in params or params["session_id"] is None):
+        return None
+    if not isinstance(session_id, str) or session_id not in _sessions:
+        return _err(rid, 4001, "orchestration session is not active")
+    if params.get("profile"):
+        return _err(rid, 4001, "use either a session or an explicit profile")
+    return None
+
+
 @method("orchestration.status")
 @_profile_scoped
 def _(rid, params: dict) -> dict:
+    if error := _orchestration_session_error(rid, params):
+        return error
     try:
         from hermes_cli.universal_models.service import ModelService
 
@@ -40,6 +58,8 @@ def _(rid, params: dict) -> dict:
 @method("orchestration.refresh")
 @_profile_scoped
 def _(rid, params: dict) -> dict:
+    if error := _orchestration_session_error(rid, params):
+        return error
     try:
         from hermes_cli.universal_models.service import ModelService
 
@@ -51,6 +71,8 @@ def _(rid, params: dict) -> dict:
 @method("orchestration.assign")
 @_profile_scoped
 def _(rid, params: dict) -> dict:
+    if error := _orchestration_session_error(rid, params):
+        return error
     from hermes_cli.universal_models.service import ModelService
 
     role = params.get("role")
@@ -78,6 +100,16 @@ def _(rid, params: dict) -> dict:
             if params.get("profile"):
                 return _err(rid, 4001, "use either a session or an explicit profile")
         live_session = _sessions.get(session_id) if session_id else None
+        rollback = None
+        if (role == "main" and mode == "pinned" and isinstance(live_session, dict)
+                and not live_session.get("running") and live_session.get("agent") is not None):
+            agent = live_session["agent"]
+            rollback = {
+                "runtime": _snapshot_agent_model_runtime(agent),
+                "fallbacks": list(getattr(agent, "_fallback_chain", []) or []),
+                "override_set": "model_override" in live_session,
+                "override": live_session.get("model_override"),
+            }
         # Let the model-switch controller validate the actual executable
         # provider and queue a running session's change at a safe turn boundary.
         # A profile-only assignment has no active main session to switch.
@@ -128,7 +160,29 @@ def _(rid, params: dict) -> dict:
                 switch = {"result": {"deferred": False}}
             else:
                 switch = {"result": {"deferred": True}}
-        assigned = service.assign(role, mode, selected_id, fallbacks)
+        try:
+            assigned = service.assign(role, mode, selected_id, fallbacks)
+        except Exception:
+            # The live swap is prepared before persistence. If the profile
+            # write fails, restore the previous runtime and session provenance;
+            # otherwise an RPC error would leave a different model running.
+            if rollback is not None:
+                agent = live_session["agent"]
+                try:
+                    _restore_agent_model_runtime(agent, rollback["runtime"])
+                    from gateway.run import GatewayRunner
+                    GatewayRunner._apply_fallback_chain_to_agent(agent, rollback["fallbacks"])
+                    if rollback["override_set"]:
+                        live_session["model_override"] = rollback["override"]
+                    else:
+                        live_session.pop("model_override", None)
+                    live_session.pop("_universal_model_rollback_failed", None)
+                    _persist_live_session_runtime(live_session)
+                except Exception:
+                    # Even a failed rollback must never send a subsequent
+                    # request using the unconfirmed new route.
+                    live_session["_universal_model_rollback_failed"] = True
+            raise
         if role == "main" and mode == "auto":
             assigned = dict(assigned)
             assigned["deferred"] = True
@@ -152,6 +206,8 @@ def _(rid, params: dict) -> dict:
 @method("orchestration.profile")
 @_profile_scoped
 def _(rid, params: dict) -> dict:
+    if error := _orchestration_session_error(rid, params):
+        return error
     action = params.get("action")
     if action not in {"activate", "save", "import", "export", "list", "delete"}:
         return _err(rid, 4002, "unsupported profile action")
@@ -167,6 +223,8 @@ def _(rid, params: dict) -> dict:
 @_profile_scoped
 def _(rid, params: dict) -> dict:
     """Read or atomically replace routing limits for the active profile."""
+    if error := _orchestration_session_error(rid, params):
+        return error
     action = params.get("action", "get")
     if action not in {"get", "set"}:
         return _err(rid, 4002, "policy action must be get or set")
@@ -200,6 +258,8 @@ def _(rid, params: dict) -> dict:
     model identity must have a recent native Ollama observation, and the
     service independently rechecks /api/tags plus /api/ps before generation.
     """
+    if error := _orchestration_session_error(rid, params):
+        return error
     model_id = params.get("model_id")
     max_tokens = params.get("max_tokens", 16)
     timeout = params.get("timeout_seconds", 15)
@@ -234,3 +294,17 @@ def _(rid, params: dict) -> dict:
 
 def register(server) -> None:
     bind_module(globals(), server, skip=("_",))
+    # The generic profile-scope wrapper chooses a named profile *before*
+    # entering the handler. Validate orchestration's mutually exclusive
+    # session/profile authority outside that wrapper, otherwise an invalid
+    # profile can be consulted before the inner guard runs.
+    for name in _registry.names():
+        scoped = server._methods[name]
+
+        def guarded(rid, params, scoped=scoped):
+            p = params if isinstance(params, dict) else {}
+            if error := server._orchestration_session_error(rid, p):
+                return error
+            return scoped(rid, params)
+
+        server.register_method(name, guarded)

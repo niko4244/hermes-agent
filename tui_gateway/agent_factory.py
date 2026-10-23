@@ -542,6 +542,7 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
     runtime) wins over global config/env. Older rows stored the resolved provider "custom" (no named entry
     matches) — recover the identity from the persisted base_url or the rebuild fails "No LLM provider
     configured". Persisted base_url/api_key/api_mode are honored only for the original runtime, never a fallback."""
+    expected_custom_endpoint = None
     if isinstance(model_override, dict) and model_override.get("_universal_local") is True:
         # A registry-verified native Ollama selection must not enter Hermes's
         # credentialed provider resolver (or its potentially paid auth fallback).
@@ -563,6 +564,19 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
     if isinstance(model_override, dict) and model_override.get("model"):
         model = str(model_override.get("model") or "")
         requested_provider = model_override.get("provider") or provider_override or None
+        # Registry identities for named Hermes custom providers carry the
+        # discovery-only "custom:<key>" prefix. The executable resolver uses
+        # the configured key itself. Resolve it only against THIS profile's
+        # enabled custom providers; do not let a stale identity fall through
+        # to an ambient/default cloud credential.
+        if (model_override.get("_universal_selection")
+                and isinstance(requested_provider, str)
+                and requested_provider.startswith("custom:")):
+            from tools.delegation_model_router import _registered_custom_provider
+            configured = _registered_custom_provider(requested_provider)
+            if configured is None:
+                raise ValueError("saved custom model provider is not registered in this profile")
+            requested_provider, expected_custom_endpoint = configured
         override_base_url = model_override.get("base_url")
         resolve_kwargs = {}
         if str(requested_provider or "").strip().lower() == "custom":
@@ -583,6 +597,13 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
         resolve_kwargs = {"requested": requested_provider, "target_model": model or None}
         overrides = {}
     resolution = _resolve_runtime_with_fallback(resolve_kwargs)
+    if expected_custom_endpoint is not None:
+        actual_provider = str(resolution.runtime.get("provider") or "")
+        actual_url = str(resolution.runtime.get("base_url") or "").rstrip("/")
+        if (actual_provider not in {"custom", requested_provider}
+                or actual_url != expected_custom_endpoint
+                or resolution.used_fallback):
+            raise ValueError("saved custom provider resolved to a different runtime")
     if (isinstance(model_override, dict) and model_override.get("_universal_selection")
             and resolution.used_fallback):
         raise ValueError("saved model selection has no authorized provider runtime")

@@ -76,7 +76,9 @@ All six `orchestration.*` JSON-RPC methods are declared in
 contract, and carry the active `session_id` when opened from a live conversation.
 The gateway binds that session's profile home and secret scope before every
 model-registry operation. Sessions without an identifier edit only the current
-profile; selecting an inactive or unknown session is refused.
+profile. Every RPC refuses stale, empty, or unknown explicit session IDs and
+rejects mixed session/profile requests before profile resolution, so a stale
+conversation cannot silently read or overwrite the launch profile.
 
 Main-agent saved assignments are consulted on current-upstream deferred/eager
 agent construction, after explicit session picks and resumable runtime
@@ -87,6 +89,10 @@ sessions switch through the real agent runtime, not a simulated request.
 Configured cloud providers use Hermes' existing credential and model-switch
 resolvers, and paid model switching still requires the host's confirmation.
 Profile-only assignments do not silently edit Hermes' global default model.
+An idle live-agent switch that succeeds before its profile write commits is
+rolled back if that write fails; if restoration also fails, the session is
+marked unsafe and refuses subsequent inference rather than silently using
+the unconfirmed model.
 
 At each TUI inference turn, the active profile's policy is checked **after**
 the normal model/fallback synchronization and **before** any LLM request.
@@ -107,6 +113,14 @@ routes. Otherwise an explicitly saved `delegation.orchestrator` or
 capability**, never from an untrusted display role. An unassigned role leaves
 the normal delegation provider unchanged. Explicit local-only restrictions
 also guard provider-owned child routes and inherited fallback chains.
+An explicit task route or an otherwise unassigned inherited route cannot
+bypass a saved local-only or per-million-token price cap. Cross-profile child
+routes are checked against their **target** profile's policy and credentials,
+not the launching profile's. Unknown, nonfinite, negative or otherwise
+unverified model/fallback pricing fails closed whenever a cap is active.
+Named custom providers are resolved from their current profile's enabled
+registry entry and the resolved runtime must match that entry's endpoint;
+their inventory namespace is never mistaken for an executable provider key.
 
 ### Scope and verification limits
 

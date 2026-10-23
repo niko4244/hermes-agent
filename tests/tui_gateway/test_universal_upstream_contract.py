@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 import pytest
 
@@ -103,6 +104,149 @@ def test_orchestration_status_binds_secondary_session_scope_not_launch():
         result = server._methods["orchestration.status"]("r", {"session_id": "secondary"})
     assert "result" in result
     assert seen == ["C:/profile-two"]
+
+
+@pytest.mark.parametrize("method,params", [
+    ("orchestration.status", {}),
+    ("orchestration.refresh", {}),
+    ("orchestration.assign", {"role": "main", "mode": "auto"}),
+    ("orchestration.profile", {"action": "save", "name": "private-profile"}),
+    ("orchestration.policy", {"action": "set", "policy": {"local_only": False}}),
+    ("orchestration.qualify", {"model_id": LOCAL["id"]}),
+])
+def test_stale_session_cannot_fall_back_to_launch_profile(method, params):
+    service = Mock()
+    with patch.dict(server._sessions, {}, clear=True), \
+            patch("hermes_cli.universal_models.service.ModelService", return_value=service):
+        result = server._methods[method]("rid", {**params, "session_id": "expired-sid"})
+    assert "error" in result
+    assert result["error"]["code"] == 4001
+    service.assert_not_called()
+
+
+def test_cannot_mix_session_authority_with_another_named_profile():
+    with patch.dict(server._sessions, {"active": {"profile_home": "C:/private"}}):
+        result = server._methods["orchestration.policy"](
+            "rid", {"session_id": "active", "profile": "other", "action": "get"})
+    assert result["error"]["code"] == 4001
+
+
+def test_explicit_empty_session_id_does_not_count_as_sessionless_authority():
+    with patch("hermes_cli.universal_models.service.ModelService") as service:
+        result = server._methods["orchestration.policy"](
+            "rid", {"session_id": "", "action": "get"})
+    assert result["error"]["code"] == 4001
+    service.assert_not_called()
+
+
+def test_idle_native_ollama_assignment_uses_real_agent_switch_not_global_config():
+    service = Mock()
+    service.status.return_value = {"models": [LOCAL], "policy": {}}
+    service._allowed.return_value = True
+    service.assign.return_value = {
+        "role": "main", "mode": "pinned", "model_id": LOCAL["id"], "fallback_ids": [],
+    }
+    agent = SimpleNamespace(
+        model="previous", provider="openrouter", base_url="https://example.invalid/v1",
+        api_key="prior", api_mode="chat_completions", _fallback_activated=False,
+        _rate_limited_until=0, _fallback_chain=[], switch_model=Mock(),
+    )
+    session = {"agent": agent, "running": False, "session_key": "test"}
+    with patch.dict(server._sessions, {"sid": session}), \
+            patch("hermes_cli.universal_models.service.ModelService", return_value=service), \
+            patch.object(server, "_restart_slash_worker"), \
+            patch.object(server, "_persist_live_session_runtime"), \
+            patch.object(server, "_append_model_switch_marker"), \
+            patch.object(server, "_emit_session_info"), \
+            patch.dict(server._methods, {"config.set": Mock(side_effect=AssertionError("global mutation"))}):
+        result = server._methods["orchestration.assign"]("r", {
+            "session_id": "sid", "role": "main", "mode": "pinned", "model_id": LOCAL["id"],
+        })
+    assert result["result"]["deferred"] is False
+    agent.switch_model.assert_called_once()
+    assert agent.switch_model.call_args.kwargs["new_model"] == LOCAL["model"]
+    assert agent.switch_model.call_args.kwargs["api_key"] == "local"
+    assert session["model_override"]["_universal_local"] is True
+    service.assign.assert_called_once()
+
+
+def test_failed_registry_write_rolls_back_idle_agent_route_and_fallbacks():
+    service = Mock()
+    service.status.return_value = {"models": [LOCAL], "policy": {}}
+    service._allowed.return_value = True
+    service.assign.side_effect = OSError("database unavailable")
+
+    agent = SimpleNamespace(
+        model="old", provider="openrouter", base_url="https://example.invalid/v1",
+        api_key="prior", api_mode="chat_completions",
+        _fallback_activated=False, _rate_limited_until=0,
+        _fallback_chain=[{"provider": "openrouter", "model": "old-fallback"}],
+    )
+
+    def fake_switch_model(**kwargs):
+        for attribute, key in (("model", "new_model"), ("provider", "new_provider"),
+                               ("api_key", "api_key"), ("base_url", "base_url"),
+                               ("api_mode", "api_mode")):
+            setattr(agent, attribute, kwargs[key])
+
+    agent.switch_model = Mock(side_effect=fake_switch_model)
+    old_override = {"model": "old", "provider": "openrouter"}
+    session = {"agent": agent, "running": False, "model_override": old_override}
+
+    with patch.dict(server._sessions, {"sid": session}), \
+            patch("hermes_cli.universal_models.service.ModelService", return_value=service), \
+            patch.object(server, "_restart_slash_worker"), \
+            patch.object(server, "_persist_live_session_runtime"), \
+            patch.object(server, "_append_model_switch_marker"), \
+            patch.object(server, "_emit_session_info"):
+        result = server._methods["orchestration.assign"](
+            "r", {"session_id": "sid", "role": "main", "mode": "pinned",
+                  "model_id": LOCAL["id"]})
+    assert result["error"]["code"] == 5071
+    assert agent.switch_model.call_count == 2
+    assert (agent.model, agent.provider, agent.api_key) == ("old", "openrouter", "prior")
+    assert session["model_override"] == old_override
+    assert agent._fallback_chain == [{"provider": "openrouter", "model": "old-fallback"}]
+    assert not session.get("_universal_model_rollback_failed")
+
+
+def test_unrecoverable_failed_assignment_never_reaches_inference():
+    from tui_gateway.universal_model_runtime import enforce_main_turn_policy
+
+    agent = SimpleNamespace(model="unexpected", provider="openrouter")
+    with pytest.raises(ValueError, match="rollback failed"):
+        enforce_main_turn_policy(agent, {"_universal_model_rollback_failed": True})
+
+
+def test_saved_named_custom_provider_resolves_by_profile_key_not_inventory_namespace():
+    selected = {"model": "model-alias", "provider": "custom:litellm",
+                "_universal_selection": True, "_universal_model_id": "custom:litellm::model-alias"}
+    resolved = SimpleNamespace(
+        used_fallback=False, selected_model=None,
+        runtime={"provider": "custom", "base_url": "https://proxy.example.test/v1",
+                 "api_key": "secret", "api_mode": "chat_completions"},
+    )
+    with patch("tools.delegation_model_router._registered_custom_provider",
+               return_value=("litellm", "https://proxy.example.test/v1")), \
+            patch.object(server, "_resolve_runtime_with_fallback", return_value=resolved) as route:
+        model, runtime = server._resolve_agent_model_runtime(selected, None)
+    assert model == "model-alias"
+    assert runtime["provider"] == "custom"
+    assert route.call_args.args[0]["requested"] == "litellm"
+
+
+def test_saved_named_custom_provider_rejects_wrong_provider_even_without_fallback_flag():
+    selected = {"model": "model-alias", "provider": "custom:litellm",
+                "_universal_selection": True}
+    mismatched = SimpleNamespace(
+        used_fallback=False, selected_model=None,
+        runtime={"provider": "openrouter", "base_url": "https://paid.example.test/v1"},
+    )
+    with patch("tools.delegation_model_router._registered_custom_provider",
+               return_value=("litellm", "https://proxy.example.test/v1")), \
+            patch.object(server, "_resolve_runtime_with_fallback", return_value=mismatched):
+        with pytest.raises(ValueError, match="different runtime"):
+            server._resolve_agent_model_runtime(selected, None)
 
 
 def test_deferred_build_takes_saved_main_model_without_overriding_session_pick():
