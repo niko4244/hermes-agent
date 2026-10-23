@@ -115,6 +115,11 @@ cloud fallbacks unless the operator explicitly configures policy-approved
 fallbacks. Invalid or unverified prices fail closed under a price cap; turning
 the restriction off leaves unconfigured legacy sessions alone. Refused turns
 still release their session's running state.
+The saved primary is matched against the executable provider identity as well
+as the model slug. Previously activated fallbacks must remain in the active
+profile's approved fallback IDs and match the executable provider/endpoint,
+including saved automatic main roles without any cost or local-only restriction.
+Removing a fallback revokes it before the next turn.
 
 For delegated children, the upstream `TaskRoute` / `DelegationProvider` path
 retains explicitly selected per-task providers, models, and cross-profile

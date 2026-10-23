@@ -41,6 +41,19 @@ def test_removed_fallback_cannot_answer_next_turn_under_unrestricted_policy():
         enforce_main_turn_policy(agent, session, service)
 
 
+def test_saved_auto_role_also_revokes_previously_activated_fallback():
+    selected = main_model_override(_cloud_row())
+    agent = SimpleNamespace(
+        model="old-fallback", provider="anthropic", base_url="https://api.anthropic.com",
+        _provider_fallback_active=True, _fallback_activated=True,
+        _fallback_chain=[{"provider": "anthropic", "model": "old-fallback"}],
+    )
+    service = _profile_service(models=[_cloud_row()])
+    service.profile.return_value["roles"][0]["mode"] = "auto"
+    with pytest.raises(ValueError, match="authorizes this session fallback"):
+        enforce_main_turn_policy(agent, {"model_override": selected}, service)
+
+
 def test_saved_main_model_rejects_unexpected_provider_even_with_same_slug():
     """An unrelated provider's identically named model is not the saved pin."""
     agent = SimpleNamespace(

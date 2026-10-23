@@ -150,7 +150,7 @@ def enforce_main_turn_policy(agent: Any, session: dict, service: Any = None) -> 
     saved_main = next((role for role in active_profile.get("roles", [])
                        if role.get("role") == "main"), None)
     saved_ids = ((saved_main.get("fallback_ids") or [])
-                 if saved_main and saved_main.get("mode") == "pinned" else [])
+                 if saved_main and saved_main.get("mode") in {"pinned", "auto"} else [])
     override = session.get("model_override")
     if isinstance(override, dict) and override.get("_universal_selection") and isinstance(active_profile.get("roles"), list):
         if saved_main is None or (saved_main.get("mode") == "pinned" and
@@ -182,7 +182,7 @@ def enforce_main_turn_policy(agent: Any, session: dict, service: Any = None) -> 
                      or getattr(agent, "api_key", None) != "local"))):
             raise ValueError("Current session does not match its saved model selection")
     if (isinstance(override, dict) and override.get("_universal_selection")
-            and saved_main and saved_main.get("mode") == "pinned"
+            and saved_main and saved_main.get("mode") in {"pinned", "auto"}
             and getattr(agent, "_provider_fallback_active", False)):
         # A fallback may remain active between turns when the primary route
         # cannot be restored (for example after an entitlement rejection).
