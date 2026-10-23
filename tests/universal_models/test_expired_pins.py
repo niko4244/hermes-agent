@@ -146,3 +146,22 @@ def test_revalidating_one_origin_retains_other_expired_pin_as_historical_hint(tm
             "SELECT payload FROM observations WHERE name='local-models-history'"
         ).fetchone()[0])
     assert {r["id"] for r in historic} == {first["id"], second["id"]}
+
+
+def test_future_dated_native_listing_cannot_trigger_pin_revalidation(tmp_path, monkeypatch):
+    row = _row("custom", "small", "ollama-live", "reachable",
+               endpoint="http://127.0.0.1:11434/v1")
+    svc = ModelService(home=tmp_path, config={}, local_endpoints=[], model_paths=[])
+    _cached_row(tmp_path, row, timestamp=2000.0)
+    p = svc.profile("export")
+    p["roles"] = [{"role": "main", "mode": "pinned", "model_id": row["id"],
+                   "fallback_ids": []}]
+    svc.profile("save", "default", p)
+    monkeypatch.setattr("hermes_cli.universal_models.service.time.time", lambda: 1000.0)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("future-dated provenance must not trigger a probe")
+
+    monkeypatch.setattr("hermes_cli.universal_models.service.local_server_models", forbidden)
+    assert svc.status()["models"] == []
+    assert svc.resolve("main") is None

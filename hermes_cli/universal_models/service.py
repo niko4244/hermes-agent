@@ -271,14 +271,23 @@ class ModelService:
         from .qualification import _valid_origin
 
         with self._connect() as conn:
-            observations = dict(conn.execute(
-                "SELECT name,payload FROM observations WHERE name IN "
+            observations = {name: (payload, measured_at) for name, payload, measured_at in conn.execute(
+                "SELECT name,payload,measured_at FROM observations WHERE name IN "
                 "('local-models','local-models-history')"
-            ))
+            )}
         old: list[dict] = []
         for name in ("local-models", "local-models-history"):
+            stored = observations.get(name)
+            if not stored:
+                continue
+            payload, measured_at = stored
+            # Future-dated observations cannot authorize even a read-only
+            # revalidation. A corrupt/clock-skewed record must fail closed
+            # rather than become a way to revive a forged catalog identity.
+            if not isinstance(measured_at, (int, float)) or not 0 <= measured_at <= time.time():
+                continue
             try:
-                prior = json.loads(observations.get(name, "[]"))
+                prior = json.loads(payload)
             except (ValueError, TypeError):
                 continue
             if isinstance(prior, list):
