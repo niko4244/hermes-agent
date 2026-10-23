@@ -1216,6 +1216,7 @@ def _build_child_agent(
     # ACP transport overrides from trusted delegation config.
     override_acp_command: Optional[str] = None,
     override_acp_args: Optional[List[str]] = None,
+    override_fallback_model: Optional[List[Dict[str, Any]]] = None,
     # Per-call role controlling whether the child can further delegate.
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
@@ -1466,7 +1467,11 @@ def _build_child_agent(
     # from rate-limits and credential exhaustion exactly like the top-level
     # agent does.  _fallback_chain is a list accepted by AIAgent's
     # fallback_model parameter (which handles both list and dict forms).
-    parent_fallback = getattr(parent_agent, "_fallback_chain", None) or None
+    parent_fallback = (
+        override_fallback_model
+        if override_fallback_model is not None
+        else (getattr(parent_agent, "_fallback_chain", None) or None)
+    )
 
     # Inherit the parent's OpenRouter provider-preference filters by default
     # (so subagents routed to the same provider honour the same routing
@@ -2916,6 +2921,22 @@ def delegate_task(
         if not task.get("goal", "").strip():
             return tool_error(f"Task {i} is missing a 'goal'.")
 
+    # Resolve the entire heterogeneous batch before creating child agents or
+    # durable transcripts. A bad pinned model must fail the whole batch without
+    # leaking side effects from already-started sibling tasks.
+    from tools.delegation_model_router import delegation_model_route
+
+    child_routes = []
+    try:
+        for task in task_list:
+            task_role = _normalize_role(task.get("role") or top_role)
+            child_creds, child_fallbacks = delegation_model_route(
+                task_role, creds, parent_agent, _resolve_delegation_credentials
+            )
+            child_routes.append((task_role, child_creds, child_fallbacks))
+    except (ValueError, TypeError, OSError) as exc:
+        return tool_error(f"Delegation model routing failed: {exc}")
+
     overall_start = time.monotonic()
     results = []
 
@@ -2959,7 +2980,7 @@ def delegate_task(
     for i, t in enumerate(task_list):
         # Per-task role beats top-level; normalise again so unknown
         # per-task values warn and degrade to leaf uniformly.
-        effective_role = _normalize_role(t.get("role") or top_role)
+        effective_role, child_creds, child_fallbacks = child_routes[i]
         child = _build_child_preserving_parent_tools(
             task_index=i,
             goal=t["goal"],
@@ -2967,18 +2988,19 @@ def delegate_task(
             # Subagents always inherit the parent's toolsets; the model
             # cannot choose or narrow them (no model-facing toolsets arg).
             toolsets=None,
-            model=creds["model"],
+            model=child_creds["model"],
             max_iterations=effective_max_iter,
             task_count=n_tasks,
             parent_agent=parent_agent,
-            override_provider=creds["provider"],
-            override_base_url=creds["base_url"],
-            override_api_key=creds["api_key"],
-            override_api_mode=creds["api_mode"],
-            override_request_overrides=creds.get("request_overrides"),
-            override_max_tokens=creds.get("max_output_tokens"),
-            override_acp_command=creds.get("command"),
-            override_acp_args=creds.get("args"),
+            override_provider=child_creds["provider"],
+            override_base_url=child_creds["base_url"],
+            override_api_key=child_creds["api_key"],
+            override_api_mode=child_creds["api_mode"],
+            override_request_overrides=child_creds.get("request_overrides"),
+            override_max_tokens=child_creds.get("max_output_tokens"),
+            override_acp_command=child_creds.get("command"),
+            override_acp_args=child_creds.get("args"),
+            override_fallback_model=child_fallbacks,
             role=effective_role,
         )
         # Tee the child's progress events into its live transcript log.

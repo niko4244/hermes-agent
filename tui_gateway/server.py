@@ -226,6 +226,8 @@ _LONG_HANDLERS = frozenset(
         # prompt.submit / session.interrupt sit unread (same class as #21123),
         # and the Desktop model pill / picker block on it every open.
         "model.options",
+        "orchestration.status",
+        "orchestration.refresh",
         # Pet RPCs hit the network (manifest fetch / spritesheet download) or do
         # per-frame PNG decode/encode (pet.cells): inline they serialize on the
         # reader thread, so picker previews trickle in one at a time and the
@@ -2159,6 +2161,15 @@ def _start_agent_build(sid: str, session: dict) -> None:
                     # them directly (no global config, no build-then-switch).
                     if override := current.get("model_override"):
                         kw["model_override"] = override
+                    else:
+                        # A pinned universal-model profile controls fresh
+                        # sessions, but never replaces a user's explicit
+                        # /model choice or a restored session runtime.
+                        from tui_gateway.universal_model_runtime import selected_profile_main_override
+
+                        profile_model = selected_profile_main_override()
+                        if profile_model:
+                            kw["model_override"] = profile_model
                     if (reasoning := current.get("create_reasoning_override")) is not None:
                         kw["reasoning_config_override"] = reasoning
                     if (tier := current.get("create_service_tier_override")) is not None:
@@ -3670,6 +3681,24 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
             "base_url": base_url or None,
             "api_mode": api_mode or None,
         }
+        # A previously observed native Ollama endpoint can be restored only
+        # while a fresh local probe still confirms this exact model/endpoint.
+        # Do not turn an old custom URL into an unauthenticated cloud proxy.
+        if provider.lower() == "custom" and base_url:
+            try:
+                from hermes_cli.universal_models.service import ModelService
+
+                observed = ModelService().status(refresh=False).get("models", [])
+                if any(
+                    item.get("source") == "ollama-live"
+                    and item.get("model") == model
+                    and item.get("endpoint") == base_url
+                    and item.get("availability") == "reachable"
+                    for item in observed
+                ):
+                    overrides["model_override"].update({"provider": "custom", "api_key": "local", "_universal_local": True})
+            except (OSError, ValueError, TypeError):
+                pass
     if provider:
         overrides["provider_override"] = provider
     if isinstance(reasoning_config, dict):
@@ -4584,6 +4613,22 @@ def _apply_pending_model_switch(sid: str, session: dict) -> None:
     the current model and never blocks the turn, matching
     ``_sync_agent_model_with_config``.
     """
+    # Universal-model local pins are carried as registry identities, rather
+    # than interpolated into the legacy /model parser (which only accepts
+    # configured named endpoints).  Resolve again at the safe turn boundary so
+    # changed profile policies or disconnected models cannot be bypassed.
+    universal_id = session.pop("pending_universal_model_switch", None)
+    if universal_id and session.get("agent") is not None:
+        try:
+            from hermes_cli.universal_models.service import ModelService
+
+            selected = ModelService().resolve("main")
+            if not selected or selected.get("id") != universal_id:
+                raise ValueError("queued model is no longer allowed by the active profile")
+            _apply_universal_local_switch(sid, session, selected, at_turn_start=True)
+        except Exception as exc:
+            _emit("error", sid, {"message": f"Could not apply queued local model: {type(exc).__name__}"})
+
     pending = session.pop("pending_model_switch", None)
     if not pending or session.get("agent") is None:
         return
@@ -4609,6 +4654,34 @@ def _apply_pending_model_switch(sid: str, session: dict) -> None:
             sid,
             {"message": f"Could not switch model: {e}"},
         )
+
+
+def _apply_universal_local_switch(
+    sid: str, session: dict, record: dict, *, at_turn_start: bool = False
+) -> None:
+    """Switch an idle native Ollama agent; keep the pending-turn guard in caller."""
+    from tui_gateway.universal_model_runtime import main_model_override
+
+    if session.get("running") and not at_turn_start:
+        raise ValueError("local model switch requires a safe turn boundary")
+    runtime = main_model_override(record)
+    if not runtime.get("_universal_local"):
+        raise ValueError("local model switch requires an observed Ollama backend")
+    agent = session.get("agent")
+    if agent is not None:
+        agent.switch_model(
+            new_model=runtime["model"], new_provider="custom",
+            api_key="local", base_url=runtime["base_url"],
+            api_mode="chat_completions",
+        )
+        # A local pin never inherits a preexisting unrelated cloud fallback.
+        agent._fallback_chain = []
+        agent._fallback_index = 0
+        _restart_slash_worker(sid, session)
+        _persist_live_session_runtime(session)
+        _append_model_switch_marker(session, model=runtime["model"], provider="custom")
+        _emit("session.info", sid, _session_info(agent, session))
+    session["model_override"] = runtime
 
 
 class CompressionLockHeld(Exception):
@@ -6370,8 +6443,20 @@ def _make_agent(
         override_base_url = model_override.get("base_url")
         override_api_key = model_override.get("api_key")
         override_api_mode = model_override.get("api_mode")
-        resolve_kwargs = {}
-        if str(requested_provider or "").strip().lower() == "custom":
+        if model_override.get("_universal_local"):
+            from tools.delegation_model_router import _loopback_endpoint
+
+            if not (requested_provider == "custom" and override_api_key == "local"
+                    and override_api_mode == "chat_completions"
+                    and _loopback_endpoint(override_base_url)):
+                raise ValueError("invalid local model routing override")
+            runtime = {
+                "provider": "custom", "base_url": override_base_url,
+                "api_key": "local", "api_mode": "chat_completions",
+            }
+        else:
+            resolve_kwargs = {}
+            if str(requested_provider or "").strip().lower() == "custom":
             # Session rows persisted before the custom-provider identity fix
             # (see _runtime_model_config) stored the resolved provider
             # "custom", which _get_named_custom_provider cannot match back to
@@ -6383,35 +6468,35 @@ def _make_agent(
             # the entry identity from the persisted base_url, falling back to
             # the configured provider when the override carries no base_url
             # (the recurring Desktop/TUI regression vector).
-            from hermes_cli.runtime_provider import canonical_custom_identity
+                from hermes_cli.runtime_provider import canonical_custom_identity
 
-            recovered = canonical_custom_identity(
-                base_url=override_base_url or None, model=model or None
-            )
-            if recovered:
-                requested_provider = recovered
-            if override_base_url:
+                recovered = canonical_custom_identity(
+                    base_url=override_base_url or None, model=model or None
+                )
+                if recovered:
+                    requested_provider = recovered
+                if override_base_url:
                 # Failing identity recovery, still hand the base_url to the
                 # direct-alias branch so pool/env credentials resolve for it.
-                resolve_kwargs["explicit_base_url"] = override_base_url
-        resolve_kwargs["requested"] = requested_provider
-        resolve_kwargs["target_model"] = model or None
-        resolution = _resolve_runtime_with_fallback(resolve_kwargs)
-        runtime = resolution.runtime
-        if resolution.used_fallback:
-            if not resolution.selected_model:
-                raise RuntimeError("Auth fallback resolved without a model")
-            model = resolution.selected_model
-        else:
+                    resolve_kwargs["explicit_base_url"] = override_base_url
+            resolve_kwargs["requested"] = requested_provider
+            resolve_kwargs["target_model"] = model or None
+            resolution = _resolve_runtime_with_fallback(resolve_kwargs)
+            runtime = resolution.runtime
+            if resolution.used_fallback:
+                if not resolution.selected_model:
+                    raise RuntimeError("Auth fallback resolved without a model")
+                model = resolution.selected_model
+            else:
             # The switch already resolved concrete credentials/endpoint; honor
             # persisted overrides only while using that original runtime. They
             # must not leak into a different fallback provider/model pair.
-            if override_base_url:
-                runtime["base_url"] = override_base_url
-            if override_api_key:
-                runtime["api_key"] = override_api_key
-            if override_api_mode:
-                runtime["api_mode"] = override_api_mode
+                if override_base_url:
+                    runtime["base_url"] = override_base_url
+                if override_api_key:
+                    runtime["api_key"] = override_api_key
+                if override_api_mode:
+                    runtime["api_mode"] = override_api_mode
     else:
         model, requested_provider = _resolve_startup_runtime()
         if isinstance(model_override, str) and model_override:
@@ -10503,6 +10588,8 @@ def _(rid, params: dict) -> dict:
                 # the new model without waiting for the swap or interrupting.
                 if session.get("running"):
                     parsed = parse_model_switch_args(value)
+                    # Latest user selection wins across both model pickers.
+                    session.pop("pending_universal_model_switch", None)
                     try:
                         pending_model = parsed.model_input
                     except Exception:
@@ -13993,6 +14080,7 @@ from . import (  # noqa: E402
     methods_prompt as _methods_prompt,
     methods_session as _methods_session,
     methods_tools as _methods_tools,
+    methods_orchestration as _methods_orchestration,
 )
 
 for _m in (
@@ -14001,6 +14089,7 @@ for _m in (
     _methods_config,
     _methods_complete,
     _methods_tools,
+    _methods_orchestration,
 ):
     _m.register(sys.modules[__name__])
 del _m
