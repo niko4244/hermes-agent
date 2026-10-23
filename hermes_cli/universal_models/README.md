@@ -20,6 +20,21 @@ observed OpenAI-compatible servers. Configured providers have no endpoint
 override: Hermes must resolve their authentic configured transport and keys.
 Capabilities and context are left unknown until actually established.
 
+Cloud configuration discovery reads only **explicit model IDs** from Hermes'
+`model.default`/`model.name`, `fallback_providers` (or legacy `fallback_model`),
+auxiliary selections and fallback chains, `model_aliases`/`model.aliases`, and
+`providers.<name>.models`/`default_model`, including legacy `custom_providers`.
+The supported provider identities come from Hermes' own provider and model
+registries (e.g. `openai-api`, `anthropic`, `gemini`, `openrouter`, `deepseek`,
+`fireworks`, `azure-foundry`, `bedrock`, `groq`, `mistral`, `together`). Names
+from built-in provider options without an endpoint retain their canonical ID;
+named user endpoints retain distinct `custom:<name>` IDs. LiteLLM proxy aliases
+likewise remain distinct `custom:litellm::<alias>` identities. The mere
+presence of an API key, environment variable, or SDK catalog does **not**
+create an inventory row: Hermes cannot infer which models an account permits
+from a key. Cloud discovery never requests a remote model catalog or exposes
+API keys, endpoint authorization paths, headers or LiteLLM upstream secrets.
+
 Availability means:
 
 * `configured` — present in Hermes/LiteLLM configuration; authentication and
