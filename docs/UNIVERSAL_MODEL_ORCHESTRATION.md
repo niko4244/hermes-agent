@@ -39,6 +39,16 @@ Persisted SQLite state is under the profile's `HERMES_HOME` and contains no
 provider tokens, raw LiteLLM upstream configuration or inference bodies.
 Loopback model observations expire after 120 seconds; historical qualification
 reports remain timestamped and cannot upgrade an expired row to reachable.
+When rebuilding an explicitly saved pinned/auto role after that expiration,
+the resolver may revalidate a **previously observed direct native Ollama**
+endpoint with a bounded read-only model-list query. Only a matching currently
+served model is eligible; an unavailable pin never falls back to a different
+model, and an expired proxy identity is never implicitly probed. Automatic
+roles without any saved selection recheck at most three previously observed
+native loopback endpoints. Unassigned roles never trigger such revalidation.
+These checks do not run inference, load models, query remote providers or
+extend historical qualification evidence. Active input/output price caps
+continue to reject unknown, nonfinite, negative or boolean cost claims.
 
 ## Upstream-specific hardware adaptation
 

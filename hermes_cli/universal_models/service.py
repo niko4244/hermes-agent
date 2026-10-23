@@ -7,6 +7,7 @@ resolver remains the authority for credentials, transports and API requests.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sqlite3
@@ -258,6 +259,67 @@ class ModelService:
         rows = self._recent("local-models")
         return rows if isinstance(rows, list) else []
 
+    def _revalidate_expired_native_pin(self, model_id: str) -> dict | None:
+        """Recheck only an explicitly saved Ollama pin after listing TTL expiry.
+
+        An operator pin is durable, but local discovery evidence expires after
+        120s. New agent builds must not rely on stale reachability or require
+        an interactive refresh after every restart. A targeted, read-only
+        /api/tags query re-establishes identity without starting a model,
+        probing other servers, or calling paid services.
+        """
+        from .qualification import _valid_origin
+
+        with self._connect() as conn:
+            observations = dict(conn.execute(
+                "SELECT name,payload FROM observations WHERE name IN "
+                "('local-models','local-models-history')"
+            ))
+        old: list[dict] = []
+        for name in ("local-models", "local-models-history"):
+            try:
+                prior = json.loads(observations.get(name, "[]"))
+            except (ValueError, TypeError):
+                continue
+            if isinstance(prior, list):
+                old.extend(r for r in prior[:2000] if isinstance(r, dict))
+        row = next((r for r in old if isinstance(r, dict) and r.get("id") == model_id), None)
+        origin = _valid_origin(row) if row is not None else None
+        if origin is None:
+            return None
+        fresh = local_server_models((origin,))
+        verified = next((r for r in fresh if r.get("id") == model_id
+                         and r.get("endpoint") == row.get("endpoint")
+                         and r.get("source") == "ollama-live"), None)
+        if verified is None:
+            return None
+        # Keep only still-fresh listings for other origins; an expired peer
+        # must not become reachable just because this endpoint was checked.
+        still_recent = self._observations()
+        replacement = [r for r in still_recent if r.get("endpoint") != row["endpoint"]]
+        replacement.extend(r for r in fresh if r.get("source") == "ollama-live"
+                           and r.get("endpoint") == row["endpoint"])
+        # One observation timestamp cannot represent independent lifetimes.
+        # Keep prior endpoint identities separately as *untrusted historical
+        # hints* so revalidating A doesn't make a previously pinned B
+        # impossible to check. History is never merged into live inventory.
+        history = {r["id"]: r for r in old if isinstance(r.get("id"), str)
+                   and _valid_origin(r) is not None}
+        history.update({r["id"]: r for r in fresh if isinstance(r.get("id"), str)
+                        and _valid_origin(r) is not None})
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO observations(name,payload,measured_at) VALUES ('local-models',?,?) "
+                "ON CONFLICT(name) DO UPDATE SET payload=excluded.payload, measured_at=excluded.measured_at",
+                (json.dumps(replacement, sort_keys=True), time.time()),
+            )
+            conn.execute(
+                "INSERT INTO observations(name,payload,measured_at) VALUES ('local-models-history',?,?) "
+                "ON CONFLICT(name) DO UPDATE SET payload=excluded.payload, measured_at=excluded.measured_at",
+                (json.dumps(list(history.values())[:2000], sort_keys=True), time.time()),
+            )
+        return dict(verified)
+
     def status(self, refresh: bool = False) -> dict:
         if refresh:
             self._live = local_server_models(self._probe_endpoints())
@@ -373,7 +435,11 @@ class ModelService:
             # of assuming that a configured or locally proxied model is free.
             for key in ("max_input_cost_per_million", "max_output_cost_per_million"):
                 if key in policy and (
-                    not isinstance(row.get(key), (float, int)) or row[key] > policy[key]
+                    isinstance(row.get(key), bool)
+                    or not isinstance(row.get(key), (float, int))
+                    or not math.isfinite(row[key])
+                    or row[key] < 0
+                    or row[key] > policy[key]
                 ):
                     return False
         return True
@@ -409,11 +475,51 @@ class ModelService:
             # An unavailable pin never silently runs another model. Fallback
             # decisions belong to the execution layer after an actual failure.
             candidates = [assignment.get("model_id")]
+            if candidates[0] not in index:
+                revalidated = self._revalidate_expired_native_pin(candidates[0])
+                if revalidated is not None:
+                    index[revalidated["id"]] = revalidated
         else:
             candidates = [assignment.get("model_id"), *assignment.get("fallback_ids", [])]
+            for candidate in candidates:
+                if candidate and candidate not in index:
+                    revalidated = self._revalidate_expired_native_pin(candidate)
+                    if revalidated is not None:
+                        index[revalidated["id"]] = revalidated
             if not any(candidates):
                 # Default auto discovery may only select independently listed
                 # native local Ollama models; never surprise-call paid cloud.
+                if not any(row.get("source") == "ollama-live"
+                           and row.get("availability") == "reachable" for row in index.values()):
+                    # Only a SAVED auto role reaches here. Recheck at most
+                    # three previously observed native endpoints after TTL
+                    # expiry; no unregistered proxy or new port is probed.
+                    from .qualification import _valid_origin
+
+                    with self._connect() as conn:
+                        cached = conn.execute(
+                            "SELECT payload FROM observations WHERE name='local-models'"
+                        ).fetchone()
+                    try:
+                        previously = json.loads(cached[0]) if cached else []
+                    except (TypeError, ValueError):
+                        previously = []
+                    origins: set[str] = set()
+                    for old in previously if isinstance(previously, list) else []:
+                        if not isinstance(old, dict):
+                            continue
+                        origin = _valid_origin(old)
+                        if origin is None or origin in origins or not isinstance(old.get("id"), str):
+                            continue
+                        origins.add(origin)
+                        if len(origins) > 3:
+                            break
+                        validated = self._revalidate_expired_native_pin(old["id"])
+                        if validated is not None:
+                            index.update({row["id"]: row for row in self._inventory()
+                                          if row.get("source") == "ollama-live"
+                                          and row.get("availability") == "reachable"})
+                            break
                 candidates = [row["id"] for row in sorted(index.values(), key=lambda m: m["id"])
                               if row.get("source") == "ollama-live" and row.get("availability") == "reachable"]
         for model_id in candidates:
