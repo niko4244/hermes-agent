@@ -49,6 +49,11 @@ native loopback endpoints. Unassigned roles never trigger such revalidation.
 These checks do not run inference, load models, query remote providers or
 extend historical qualification evidence. Active input/output price caps
 continue to reject unknown, nonfinite, negative or boolean cost claims.
+Cached discovery rows are reconstructed from canonical endpoint-qualified
+model identities before use; neither a cached local-model price field nor a
+forged Ollama provenance label may replace a configured remote provider or
+grant consent. Verified provider-side cloud prices are not currently ingested:
+cloud routes with active price caps remain disabled rather than guessing.
 
 ## Upstream-specific hardware adaptation
 
@@ -148,6 +153,12 @@ live session. Changes to local-only policy, cost caps, or permitted fallback
 IDs invalidate cached unconsumed hops before the provider binder runs. This
 guard is scoped to that same saved-role gateway agent and does not change
 the behavior of legacy agents with no universal assignment.
+The current saved policy is also rechecked after fallback binding, at the
+streaming and nonstreaming provider request boundaries, and after request-local
+client construction immediately before SDK creation. These checks cover
+profile activation, fallback removal, local-only and cost-cap edits that occur
+after the original turn admission. An already-issued request cannot be
+retroactively cancelled by these authorization checks.
 
 For delegated children, the upstream `TaskRoute` / `DelegationProvider` path
 retains explicitly selected per-task providers, models, and cross-profile

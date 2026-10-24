@@ -28,9 +28,9 @@ def _intercept_paid_wire(agent, sent):
 @pytest.mark.parametrize("revocation", [
     "local_only", "cost_cap", "remove_fallback", "activate_new_profile",
 ])
-def test_revoked_after_fallback_bind_cannot_open_paid_stream(pipeline, revocation):
+def test_revoked_after_fallback_bind_cannot_open_paid_stream(pipeline, revocation, monkeypatch):
     registry, session, _events, local_requests, local = pipeline
-    paid = _install_mock_cloud_fallback(registry, local)
+    paid = _install_mock_cloud_fallback(registry, local, monkeypatch)
     agent = session["agent"]
     original = (agent.model, agent.provider)
     binding = []
@@ -110,10 +110,10 @@ def test_non_universal_legacy_gateway_agent_keeps_unmodified_wire(pipeline):
     assert local_requests == []
 
 
-def test_nonstreaming_fallback_rechecked_after_profile_change(pipeline):
+def test_nonstreaming_fallback_rechecked_after_profile_change(pipeline, monkeypatch):
     registry, session, _events, requests, local = pipeline
     agent = session["agent"]
-    _install_mock_cloud_fallback(registry, local)
+    _install_mock_cloud_fallback(registry, local, monkeypatch)
     agent.model, agent.provider, agent.base_url = (
         "paid-standin", "openrouter", "https://no-network-allowed.invalid/v1")
     agent.api_key = "DUMMY-NEVER-SENT"
