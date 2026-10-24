@@ -186,6 +186,17 @@ entitlements or quotas, perform unapproved paid-cloud inference, measure all
 GPU/VRAM configurations, or implement global monetary usage accounting.
 Configured cloud names remain **configured**, not confirmed accessible.
 
+**Open release-blocking custom-provider consent gap:** the currently saved
+cloud confirmation is keyed to role and model ID, not to the executable
+custom-provider backend. Changing a named custom provider's configured
+endpoint while retaining its model ID can redirect a subsequently constructed
+saved route without a new confirmation. An isolated, CPU-only repro proved
+this behavior without contacting a paid provider. Production use of mutable
+custom cloud-provider routes requires a persisted, credential-free backend
+binding fingerprint and fail-closed checks during profile mutations, main
+turns, delegated routing, and fallback/request dispatch. The midturn request
+guards do not, by themselves, close this consent-provenance gap.
+
 The current-upstream integration is tested by
 `tests/tui_gateway/test_universal_model_routing.py`,
 `tests/tui_gateway/test_universal_upstream_contract.py`, and
