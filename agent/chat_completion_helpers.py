@@ -767,7 +767,12 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     """
     _authorize_gateway_universal_request(agent)
     if agent.api_mode == "codex_responses":
-        return agent._run_codex_stream(api_kwargs, client=make_client("codex_stream_request"),
+        request_client = make_client("codex_stream_request")
+        # Client construction (token refresh / provider setup) can overlap a
+        # hot profile switch. Codex Responses must obey the same post-build
+        # authorization barrier as the Chat Completions request path.
+        _authorize_gateway_universal_request(agent)
+        return agent._run_codex_stream(api_kwargs, client=request_client,
             on_first_delta=getattr(agent, "_codex_on_first_delta", None))
     if agent.api_mode == "anthropic_messages":
         # Request-local client so the stale/interrupt watchdog aborts sockets
@@ -783,10 +788,13 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
         # replacement agent.client may be a native OpenAI client while provider stays
         # "moa": pop the MoA-internal key ONLY then (the facade consumes it; stripping
         # it there forces a duplicate fan-out). Only the facade exposes ``prepare()`` (#78382).
-        _completions = getattr(getattr(agent.client, "chat", None), "completions", None)
-        if not callable(getattr(_completions, "prepare", None)):
+        completions = getattr(getattr(agent.client, "chat", None), "completions", None)
+        if not callable(getattr(completions, "prepare", None)):
             api_kwargs.pop("_moa_prepared_request", None)
-        return agent.client.chat.completions.create(**api_kwargs)
+        # The facade may resolve cloud fan-out routes during this lookup;
+        # authorize after binding it, not only before entering the branch.
+        _authorize_gateway_universal_request(agent)
+        return completions.create(**api_kwargs)
     request_client = make_client("chat_completion_request")
     # #93650: keep the bulk wire-format payload out of the SDK's GIL-holding
     # request transform. No-op unless this really is the OpenAI SDK, so the
