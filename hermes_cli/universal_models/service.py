@@ -38,6 +38,10 @@ _VALID_AVAILABILITY = {"configured", "reachable"}
 _MAX_FALLBACKS = 16
 
 
+class CloudConsentRequired(ValueError):
+    """A profile change would authorize new remote/proxied inference."""
+
+
 def _require_identifier(value: Any, pattern: re.Pattern, label: str) -> str:
     if not isinstance(value, str) or not pattern.fullmatch(value):
         raise ValueError(f"invalid {label}; expected letters/digits, dots, underscores or hyphens")
@@ -191,10 +195,58 @@ class ModelService:
         parsed = _parse_profile(json.loads(row[0]))
         return {"name": selected, **parsed}
 
-    def _save(self, name: str, payload: dict) -> dict:
+    @staticmethod
+    def _chargeable_profile_routes(profile: dict, models: dict[str, dict]) -> set[tuple[str, str]]:
+        """Potentially billable routes, including explicit auto picks and fallbacks.
+
+        Offline/unknown IDs are treated as remotely billable until proven
+        native local. A restrictive policy can make an otherwise remote route
+        non-executable; lifting that restriction triggers consent separately.
+        """
+        policy = profile["policy"]
+        if policy.get("local_only") is True:
+            return set()
+        routes = set()
+        for role in profile["roles"]:
+            for model_id in (role.get("model_id"), *role["fallback_ids"]):
+                if not model_id:
+                    continue
+                model = models.get(model_id)
+                if model is not None:
+                    if model.get("source") in {"ollama-live", "local-gguf", "local-hf", "ollama-manifest"}:
+                        continue
+                    if any(key in policy for key in (
+                        "max_input_cost_per_million", "max_output_cost_per_million"
+                    )) and not ModelService._allowed(model, policy, frozenset(), None):
+                        continue
+                elif any(key in policy for key in (
+                    "max_input_cost_per_million", "max_output_cost_per_million"
+                )):
+                    continue
+                routes.add((role["role"], model_id))
+        return routes
+
+    def _check_cloud_consent(self, active: dict, candidate: dict, *,
+                             confirm_cloud: bool, models: dict[str, dict]) -> None:
+        if confirm_cloud:
+            return
+        prior = self._chargeable_profile_routes(active, models)
+        proposed = self._chargeable_profile_routes(candidate, models)
+        if proposed - prior:
+            raise CloudConsentRequired("remote or proxied profile routes require explicit cloud confirmation")
+
+    def _save(self, name: str, payload: dict, *, confirm_cloud: bool = False) -> dict:
         selected = _require_identifier(name, _PROFILE_RE, "profile name")
         validated = _parse_profile(payload)
+        models = {row["id"]: row for row in self._inventory()}
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            active_name = conn.execute("SELECT value FROM metadata WHERE key='active_profile'").fetchone()[0]
+            active_row = conn.execute("SELECT payload FROM profiles WHERE name=?", (active_name,)).fetchone()
+            if active_row is None:
+                raise ValueError("active routing profile is unavailable")
+            self._check_cloud_consent(_parse_profile(json.loads(active_row[0])), validated,
+                                      confirm_cloud=confirm_cloud, models=models)
             conn.execute(
                 "INSERT INTO profiles(name,payload) VALUES (?,?) ON CONFLICT(name) DO UPDATE SET payload=excluded.payload",
                 (selected, json.dumps(validated, sort_keys=True, separators=(",", ":"))),
@@ -394,7 +446,10 @@ class ModelService:
             conn.execute("UPDATE profiles SET payload=? WHERE name=?", (json.dumps(profile, sort_keys=True), name))
         return assignment
 
-    def profile(self, action: str, name: str | None = None, data: dict | None = None) -> dict:
+    def profile(self, action: str, name: str | None = None, data: dict | None = None,
+                *, confirm_cloud: bool = False) -> dict:
+        if not isinstance(confirm_cloud, bool):
+            raise ValueError("confirm_cloud must be a boolean")
         if action == "list":
             return {"profiles": self.status()["profiles"], "active_profile": self._active()}
         if action == "export":
@@ -406,13 +461,22 @@ class ModelService:
             if destination is None:
                 destination = self._active()
             content = data if data is not None else self._load()
-            return self._save(destination, content)
+            return self._save(destination, content, confirm_cloud=confirm_cloud)
         if action == "activate":
             selected = _require_identifier(name, _PROFILE_RE, "profile name")
+            models = {row["id"]: row for row in self._inventory()}
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                if conn.execute("SELECT 1 FROM profiles WHERE name=?", (selected,)).fetchone() is None:
+                target_row = conn.execute("SELECT payload FROM profiles WHERE name=?", (selected,)).fetchone()
+                if target_row is None:
                     raise KeyError(f"unknown profile: {selected}")
+                active_name = conn.execute("SELECT value FROM metadata WHERE key='active_profile'").fetchone()[0]
+                active_row = conn.execute("SELECT payload FROM profiles WHERE name=?", (active_name,)).fetchone()
+                if active_row is None:
+                    raise ValueError("active routing profile is unavailable")
+                self._check_cloud_consent(_parse_profile(json.loads(active_row[0])),
+                                          _parse_profile(json.loads(target_row[0])),
+                                          confirm_cloud=confirm_cloud, models=models)
                 conn.execute("UPDATE metadata SET value=? WHERE key='active_profile'", (selected,))
             return self._load(selected)
         if action == "delete":
@@ -420,6 +484,10 @@ class ModelService:
             if selected in {"default", self._active()}:
                 raise ValueError("cannot delete the default or active profile")
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                active = conn.execute("SELECT value FROM metadata WHERE key='active_profile'").fetchone()[0]
+                if selected == active:
+                    raise ValueError("cannot delete the default or active profile")
                 conn.execute("DELETE FROM profiles WHERE name=?", (selected,))
             return {"deleted": selected}
         raise ValueError("action must be list, save, import, export, activate or delete")
