@@ -4,8 +4,6 @@ The primary failure and the would-be paid provider are hermetic: no hosted API
 can be reached, and the real gateway/AIAgent turn runs under a temporary home.
 """
 
-import json
-import time
 from unittest.mock import patch
 
 import httpx
@@ -14,7 +12,7 @@ from openai import NotFoundError
 
 from agent.error_classifier import FailoverReason
 from tests.tui_gateway.test_universal_turn_pipeline import local_ollama_wire, pipeline
-from tui_gateway import server
+from tui_gateway import server, universal_model_runtime
 
 
 def _save_policy(registry, policy, *, confirm_cloud=False):
@@ -24,25 +22,19 @@ def _save_policy(registry, policy, *, confirm_cloud=False):
     }, confirm_cloud=confirm_cloud)
 
 
-def _install_mock_cloud_fallback(registry, local):
-    """Give the saved role a discovered billable-like provider, without a real credential."""
-    paid = {
-        **local,
-        "id": "fixture:cloud-standin",
-        "model": "paid-standin",
-        "provider": "openrouter",
-        "source": "configured",
-        "availability": "configured",
-        "endpoint": "https://no-network-allowed.invalid/v1",
-        "loaded": False,
+def _install_mock_cloud_fallback(registry, local, monkeypatch):
+    """Register a mock cloud provider through config, never a forged native listing."""
+    registry._config_override = {
+        **dict(registry._config_override or {}),
+        "providers": {"openrouter": {"models": ["paid-standin"]}},
     }
-    with registry._connect() as conn:
-        observed = json.loads(conn.execute(
-            "SELECT payload FROM observations WHERE name='local-models'").fetchone()[0])
-        observed.append(paid)
-        conn.execute("UPDATE observations SET payload=?,measured_at=? WHERE name='local-models'",
-                     (json.dumps(observed), time.time()))
-    assert any(row["id"] == paid["id"] for row in registry.status()["models"])
+    paid = next(row for row in registry.status()["models"]
+                if row["id"] == "openrouter::paid-standin")
+    assert paid["source"] == "hermes-provider"
+    # The gateway normally rebuilds the same profile's provider configuration
+    # from the on-disk config. Share the fixture registry's explicit provider
+    # config instead, without touching any real user configuration.
+    monkeypatch.setattr(universal_model_runtime, "_active_registry", lambda: registry)
     registry.assign("main", "pinned", local["id"], [paid["id"]])
     # The fixture explicitly authorizes its mock billable fallback before the
     # turn. Revocation during inference must never use this confirmation flag.
@@ -61,7 +53,7 @@ def _no_cloud_creds(_record, _parent):
 def test_midturn_profile_revocation_never_binds_cloud_fallback(pipeline, monkeypatch, revocation):
     registry, session, events, requests, local = pipeline
     monkeypatch.setenv("HERMES_STREAM_RETRIES", "0")
-    paid = _install_mock_cloud_fallback(registry, local)
+    paid = _install_mock_cloud_fallback(registry, local, monkeypatch)
     agent = session["agent"]
     agent._api_max_retries = 1
     seen = []
