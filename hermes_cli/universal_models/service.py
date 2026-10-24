@@ -19,6 +19,8 @@ from typing import Any, Iterator, Mapping
 from hermes_constants import get_hermes_home
 
 from .discovery import (
+    _name,
+    _row,
     config_aliases,
     configured_models,
     hardware_summary,
@@ -104,6 +106,46 @@ def _parse_profile(data: Any) -> dict:
     if len({row["role"] for row in parsed}) != len(parsed):
         raise ValueError("duplicate role in profile")
     return {"roles": parsed, "policy": _parse_policy(data.get("policy"))}
+
+
+def _validated_local_observation(row: Any) -> dict | None:
+    """Reconstruct the metadata local probes can actually establish.
+
+    SQLite observations are cached listings, not a model-pricing authority.
+    Their purported provider, ID, endpoint, cost and source cannot replace a
+    configured paid model or mint a consent-exempt native model identity.
+    """
+    if not isinstance(row, dict):
+        return None
+    source = row.get("source")
+    if source not in {"ollama-live", "openai-compatible-live"}:
+        return None
+    model, endpoint = _name(row.get("model")), row.get("endpoint")
+    if not model or not isinstance(endpoint, str):
+        return None
+    from urllib.parse import urlsplit
+
+    origin = safe_endpoint(endpoint)
+    if not origin or endpoint != f"{origin}/v1":
+        return None
+    parts = urlsplit(origin)
+    if parts.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        return None
+    if source == "ollama-live" and parts.scheme != "http":
+        return None
+    canonical = _row("custom", model, source, "reachable", endpoint=endpoint)
+    if (row.get("id") != canonical["id"] or row.get("provider") != "custom"
+            or row.get("availability") != "reachable"):
+        return None
+    if source == "ollama-live" and row.get("loaded") is True:
+        canonical["loaded"] = True
+        context = row.get("context_window")
+        if (row.get("context_source") == "ollama_api_ps_loaded_context"
+                and isinstance(context, int) and not isinstance(context, bool)
+                and 0 < context <= 10_000_000):
+            canonical["context_window"] = context
+            canonical["context_source"] = "ollama_api_ps_loaded_context"
+    return canonical
 
 
 class ModelService:
@@ -216,9 +258,10 @@ class ModelService:
             if not isinstance(entries, list):
                 continue
             for entry in entries[:2000]:
-                if (isinstance(entry, dict) and entry.get("source") == "ollama-live"
-                        and isinstance(entry.get("id"), str) and _valid_origin(entry) is not None):
-                    known.add(entry["id"])
+                validated = _validated_local_observation(entry)
+                if (validated is not None and validated["source"] == "ollama-live"
+                        and _valid_origin(validated) is not None):
+                    known.add(validated["id"])
         return known
 
     @staticmethod
@@ -339,7 +382,10 @@ class ModelService:
         # Persist only metadata, with a short freshness window; a model that
         # answered /models yesterday must not still appear executable today.
         rows = self._recent("local-models")
-        return rows if isinstance(rows, list) else []
+        if not isinstance(rows, list):
+            return []
+        valid = (_validated_local_observation(row) for row in rows[:2000])
+        return [row for row in valid if row is not None]
 
     def _revalidate_expired_native_pin(self, model_id: str) -> dict | None:
         """Recheck only an explicitly saved Ollama pin after listing TTL expiry.
