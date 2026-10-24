@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -32,7 +33,11 @@ async def _desktop(tmp_path, monkeypatch, turns):
     from gateway.session import SessionStore
     from gateway.session_authority import initialize_session_authority
     from gateway.session_controls import AuthorityConnection
-    from tui_gateway import server
+    # Import-time update recovery traverses Git's common directory under the
+    # protected installed checkout when this test runs from a linked worktree.
+    # It is unrelated to onboarding and must not escape the isolated home.
+    with patch("hermes_cli._early_recovery.restore_interrupted_pull", return_value=False):
+        from tui_gateway import server
 
     home = tmp_path / ".hermes"
     home.mkdir()
