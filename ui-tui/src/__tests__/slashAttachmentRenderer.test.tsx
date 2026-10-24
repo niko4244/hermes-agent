@@ -217,7 +217,7 @@ it('a skill slash command keeps the staged image descriptors through the expande
   } finally { h.close() }
 })
 
-it('keeps the caption and its image token in the composer when the pending-input journal cannot be written', async () => {
+it.skipIf(process.platform === 'win32')('keeps the caption and its image token in the composer when the pending-input journal cannot be written', async () => {
   const h = mount(true)
   vi.stubEnv('HERMES_TUI_GATEWAY_URL', '')
   const path = join(h.home, 'shot.png')
@@ -241,7 +241,7 @@ it('keeps the caption and its image token in the composer when the pending-input
   } finally { chmodSync(journal, 0o700); h.close() }
 })
 
-it('keeps `/queue` text in the composer until the pending-input journal holds it', async () => {
+it.skipIf(process.platform === 'win32')('keeps `/queue` text in the composer until the pending-input journal holds it', async () => {
   const h = mount(true)
   const journal = join(h.home, 'tui-pending-inputs')
   mkdirSync(journal, { recursive: true })
@@ -259,7 +259,7 @@ it('keeps `/queue` text in the composer until the pending-input journal holds it
   } finally { chmodSync(journal, 0o700); h.close() }
 })
 
-it('a failed attempt write leaves the queue head claimable instead of wedged in flight', async () => {
+it.skipIf(process.platform === 'win32')('a failed attempt write leaves the queue head claimable instead of wedged in flight', async () => {
   const h = mount(true)
   const journal = join(h.home, 'tui-pending-inputs')
 

@@ -27,8 +27,21 @@ import json
 import types
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import hermes_cli.runtime_provider as rp
 from hermes_state import SessionDB
+
+
+@pytest.fixture(autouse=True)
+def _disable_irrelevant_checkout_recovery_during_agent_import():
+    """Importing run_agent must not inspect the real installed checkout.
+
+    These tests exercise provider/session resolution, not interrupted-updater
+    recovery. Their hermetic home I/O guard must stay enabled.
+    """
+    with patch("hermes_cli._early_recovery.restore_interrupted_pull", return_value=False):
+        yield
 
 MIMO_URL = "https://token-plan-cn.xiaomimimo.com/v1"
 MIMO_KEY = "sk-mimo-entry-key"

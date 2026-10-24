@@ -30,7 +30,11 @@ it('stages private immutable local bytes, uploads remote bytes, and never falls 
     const image = await stageImagePath(`"${source}" caption`, gw, captureDestination())
     expect(dirname(image.path)).toBe(join(home, 'cache', 'images'))
     expect(image).toMatchObject({ mime: 'image/png', remainder: 'caption' })
-    expect(statSync(image.path).mode & 0o777).toBe(0o600)
+    // Windows ACLs, unlike POSIX mode bits, are not represented by 0o600.
+    // Keep the strict owner-only file mode assertion on supporting hosts.
+    if (process.platform !== 'win32') {
+      expect(statSync(image.path).mode & 0o777).toBe(0o600)
+    }
     writeFileSync(source, 'changed')
     expect(readFileSync(image.path)).toEqual(png)
     expect(request).not.toHaveBeenCalled()

@@ -3,7 +3,16 @@ entry) must carry the same one-shot switch notice the messaging gateway surfaces
 private notice key must never reach the AIAgent constructor. Drives the real ``_make_agent``."""
 from unittest.mock import patch
 
+import pytest
+
 from hermes_cli.auth import AuthError
+
+
+@pytest.fixture(autouse=True)
+def _disable_irrelevant_checkout_recovery_during_agent_import():
+    """Agent imports in this gateway test must not probe the installed Git worktree."""
+    with patch("hermes_cli._early_recovery.restore_interrupted_pull", return_value=False):
+        yield
 
 
 class _StubAgent:
