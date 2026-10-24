@@ -17,11 +17,11 @@ from tests.tui_gateway.test_universal_turn_pipeline import local_ollama_wire, pi
 from tui_gateway import server
 
 
-def _save_policy(registry, policy):
+def _save_policy(registry, policy, *, confirm_cloud=False):
     current = registry.profile("export")
     return registry.profile("save", "default", {
         "name": "default", "roles": current["roles"], "policy": policy,
-    })
+    }, confirm_cloud=confirm_cloud)
 
 
 def _install_mock_cloud_fallback(registry, local):
@@ -44,7 +44,9 @@ def _install_mock_cloud_fallback(registry, local):
                      (json.dumps(observed), time.time()))
     assert any(row["id"] == paid["id"] for row in registry.status()["models"])
     registry.assign("main", "pinned", local["id"], [paid["id"]])
-    _save_policy(registry, {})
+    # The fixture explicitly authorizes its mock billable fallback before the
+    # turn. Revocation during inference must never use this confirmation flag.
+    _save_policy(registry, {}, confirm_cloud=True)
     return paid
 
 
