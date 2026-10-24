@@ -142,6 +142,12 @@ as the model slug. Previously activated fallbacks must remain in the active
 profile's approved fallback IDs and match the executable provider/endpoint,
 including saved automatic main roles without any cost or local-only restriction.
 Removing a fallback revokes it before the next turn.
+During an already-running universal main turn, every provider fallback
+activation rechecks the active profile using the gateway's ContextVar-bound
+live session. Changes to local-only policy, cost caps, or permitted fallback
+IDs invalidate cached unconsumed hops before the provider binder runs. This
+guard is scoped to that same saved-role gateway agent and does not change
+the behavior of legacy agents with no universal assignment.
 
 For delegated children, the upstream `TaskRoute` / `DelegationProvider` path
 retains explicitly selected per-task providers, models, and cross-profile
@@ -178,8 +184,27 @@ gateway-contract and native TUI tests. Hermetic loopback-stream tests in
 `tests/tui_gateway/test_universal_turn_pipeline.py` construct the real
 `AIAgent` and execute real gateway turn handling with a local test server.
 They prove the route and streaming integration, not a model's generated
-intelligence. Real model-generated inference on the new upstream still
-requires a safely usable, already-loaded local Ollama model; no generation
-should be inferred from a stub response or listing-installed models.
+intelligence. To exercise **actual model-generated output** via the same
+gateway path, use the optional
+`tests/tui_gateway/test_universal_live_ollama_optin.py` smoke test. It checks
+native Ollama `/api/ps` first and skips unless the target model is *already
+resident*. It does not pull a model or request a different one, and it has no
+cloud provider fallback; as with any Ollama inference, an externally evicted
+model could reload if residency changes after the preflight check. The test
+builds a temporary isolated Hermes profile with `local_only=true` and no
+fallbacks. On Windows with the test Python already installed, run directly:
+
+```powershell
+$env:HERMES_LIVE_OLLAMA_SMOKE = '1'
+$env:HERMES_LIVE_OLLAMA_MODEL = 'llama3.2:3b' # change only to an already resident model
+python -m pytest tests/tui_gateway/test_universal_live_ollama_optin.py -q -rs
+```
+
+The canonical `scripts/run_tests.sh` deliberately sanitizes opt-in
+environment variables, so its ordinary run reports this optional test as
+skipped. A successful direct opt-in test validates genuine streaming inference
+for that model and host only; it is not evidence of paid-cloud entitlements,
+pricing, or all model/provider combinations. A real resident `llama3.2:3b`
+completed this smoke test on October 23, 2026 (1 passed in 26.98 seconds).
 Ordinary Hermes sessions with no saved model profiles do not create a
 universal-model SQLite sidecar on their normal turn/build path.
