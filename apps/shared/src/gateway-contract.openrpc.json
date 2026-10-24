@@ -25346,6 +25346,11 @@
             ],
             "default": null,
             "title": "Data"
+          },
+          "confirm_cloud": {
+            "default": false,
+            "title": "Confirm Cloud",
+            "type": "boolean"
           }
         },
         "required": [
@@ -25433,6 +25438,30 @@
             ],
             "default": null,
             "title": "Deleted"
+          },
+          "confirm_required": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Confirm Required"
+          },
+          "warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Warning"
           }
         },
         "title": "OrchestrationProfileResult",

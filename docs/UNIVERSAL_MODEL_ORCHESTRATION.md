@@ -111,6 +111,15 @@ otherwise execute after the interaction ends. The existing live-switch
 large-model confirmation remains an additional check, not a substitute.
 Confirmation is permission to select a potentially billable provider, **not**
 a price or entitlement verification.
+Profile `save`, `import` and `activate` also compare the destination's
+newly enabled remote primary/fallback routes against the currently active
+profile. Potentially billable additions require explicit
+`orchestration.profile(confirm_cloud=true)` consent and a native TUI
+confirmation screen. The registry enforces this check in the same SQLite
+transaction as the profile mutation, so a denied confirmation cannot
+partially activate a route. Explicitly known direct native Ollama pins stay
+local even after their short-lived discovery listing expires; a localhost
+OpenAI-compatible proxy is not assumed to be free.
 Profile-only assignments do not silently edit Hermes' global default model.
 An idle live-agent switch that succeeds before its profile write commits is
 rolled back if that write fails; if restoration also fails, the session is

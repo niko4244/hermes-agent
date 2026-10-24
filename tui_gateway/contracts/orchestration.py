@@ -96,6 +96,7 @@ class OrchestrationProfileParams(OrchestrationScopeParams):
     action: Literal["activate", "save", "import", "export", "list", "delete"]
     name: str | None = None
     data: JsonValue | None = None
+    confirm_cloud: bool = False
 
 
 class OrchestrationProfileResult(OpenModel):
@@ -105,6 +106,8 @@ class OrchestrationProfileResult(OpenModel):
     profiles: list[OrchestrationProfileRow] | None = None
     active_profile: str | None = None
     deleted: str | None = None
+    confirm_required: bool | None = None
+    warning: str | None = None
 
 
 method("orchestration.profile", params=OrchestrationProfileParams, result=OrchestrationProfileResult,

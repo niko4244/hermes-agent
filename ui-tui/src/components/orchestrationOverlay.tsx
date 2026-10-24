@@ -55,6 +55,7 @@ type Stage =
   | 'cap-input'
   | 'policy-confirm'
   | 'cloud-confirm'
+  | 'profile-confirm'
   | 'qualify-confirm'
 const TABS: readonly Stage[] = ['roles', 'models', 'profiles', 'policy']
 const POLICY_FIELDS = ['local_only', 'max_input_cost_per_million', 'max_output_cost_per_million'] as const
@@ -100,6 +101,13 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
     fallbackIds?: string[]
     onSaved?: () => void
     from: Stage
+  } | null>(null)
+  const [pendingProfile, setPendingProfile] = useState<{
+    params: RpcMethods['orchestration.profile']['params']
+    success: string
+    from: Stage
+    warning: string
+    onSaved?: () => void
   } | null>(null)
   const [qualifyTarget, setQualifyTarget] = useState<OrchestrationModel | null>(null)
   const [qualifyTokens, setQualifyTokens] = useState(32)
@@ -219,6 +227,17 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
       .then(result => {
         const summary = result as OrchestrationAssignResult
         if (summary?.confirm_required) {
+          if (method === 'orchestration.profile' && !(params as { confirm_cloud?: boolean }).confirm_cloud) {
+            setPendingProfile({
+              params: params as RpcMethods['orchestration.profile']['params'],
+              success,
+              onSaved,
+              from: stage,
+              warning: summary.warning || 'This profile may enable billable providers.'
+            })
+            setStage('profile-confirm')
+            return
+          }
           setError(
             summary.warning || 'This provider requires price confirmation. Use /model to review before switching.'
           )
@@ -382,6 +401,12 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
       return
     }
 
+    if (stage === 'profile-confirm') {
+      setStage(pendingProfile?.from ?? 'profiles')
+      setPendingProfile(null)
+      return
+    }
+
     if (stage === 'models' || stage === 'fallbacks') {
       setStage('roles')
       setQuery('')
@@ -411,6 +436,24 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
           () => {
             pendingCloud.onSaved?.()
             setPendingCloud(null)
+          }
+        )
+      }
+      return
+    }
+
+    if (stage === 'profile-confirm') {
+      if (key.escape || ch === 'n') {
+        back()
+      } else if (ch === 'y' && pendingProfile) {
+        mutate(
+          'orchestration.profile',
+          { ...pendingProfile.params, confirm_cloud: true },
+          pendingProfile.success,
+          () => {
+            pendingProfile.onSaved?.()
+            setPendingProfile(null)
+            setStage('profiles')
           }
         )
       }
@@ -698,6 +741,8 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
         ? 'profiles'
         : stage === 'fallbacks' || stage === 'create-role' || stage === 'cloud-confirm'
           ? 'roles'
+          : stage === 'profile-confirm'
+            ? 'profiles'
           : stage === 'cap-input' || stage === 'policy-confirm'
             ? 'policy'
             : stage === 'qualify-confirm'
@@ -782,6 +827,13 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
           <Text color={t.color.muted}>
             Changing these limits can permit billable model routing. y save · n/Esc cancel
           </Text>
+        </Box>
+      )}
+      {stage === 'profile-confirm' && pendingProfile && (
+        <Box flexDirection="column">
+          <Text bold color={t.color.accent}>Confirm profile change with possible cloud charges?</Text>
+          <Text color={t.color.label}>{pendingProfile.warning}</Text>
+          <Text color={t.color.muted}>y accept potential provider charges · n/Esc cancel</Text>
         </Box>
       )}
       {stage === 'cloud-confirm' && pendingCloud && (
@@ -943,6 +995,8 @@ export function OrchestrationOverlay({ gw, maxWidth, onClose, sessionId, t }: Or
                       ? 'y confirm policy write · n/Esc cancel'
                   : stage === 'cloud-confirm'
                     ? 'y confirm possible cloud charges · n/Esc cancel'
+                  : stage === 'profile-confirm'
+                    ? 'y confirm profile and potential cloud charges · n/Esc cancel'
                       : stage === 'qualify-confirm'
                         ? 'y run local-only probe · [ ] token limit · - + timeout · n/Esc cancel'
                         : stage === 'save'

@@ -66,7 +66,9 @@ def test_expired_proxy_pin_never_performs_automatic_revalidation(tmp_path, monke
     p = svc.profile("export")
     p["roles"] = [{"role": "main", "mode": "pinned", "model_id": proxy["id"],
                    "fallback_ids": []}]
-    svc.profile("save", "default", p)
+    # A loopback OpenAI-compatible proxy may reach paid cloud services; this
+    # test deliberately stages such a route with explicit operator consent.
+    svc.profile("save", "default", p, confirm_cloud=True)
     monkeypatch.setattr("hermes_cli.universal_models.service.time.time", lambda: 1130.0)
 
     def forbidden(*args, **kwargs):

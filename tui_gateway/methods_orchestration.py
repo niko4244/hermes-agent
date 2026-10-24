@@ -251,10 +251,20 @@ def _(rid, params: dict) -> dict:
     action = params.get("action")
     if action not in {"activate", "save", "import", "export", "list", "delete"}:
         return _err(rid, 4002, "unsupported profile action")
+    if not isinstance(params.get("confirm_cloud", False), bool):
+        return _err(rid, 4002, "confirm_cloud must be a boolean")
     try:
-        from hermes_cli.universal_models.service import ModelService
+        from hermes_cli.universal_models.service import CloudConsentRequired, ModelService
 
-        return _ok(rid, ModelService().profile(action, params.get("name"), params.get("data")))
+        try:
+            result = ModelService().profile(
+                action, params.get("name"), params.get("data"),
+                confirm_cloud=params.get("confirm_cloud", False),
+            )
+        except CloudConsentRequired:
+            return _ok(rid, {"confirm_required": True,
+                             "warning": "This saved profile contains remote or proxied model routes that could incur provider charges. Confirm before saving or activating."})
+        return _ok(rid, result)
     except (ValueError, TypeError, OSError, KeyError) as exc:
         return _err(rid, 5072, f"Model profile failed: {type(exc).__name__}")
 

@@ -2024,6 +2024,7 @@ export interface OrchestrationProfileParams {
   action: 'activate' | 'save' | 'import' | 'export' | 'list' | 'delete'
   name?: string | null
   data?: unknown | null
+  confirm_cloud?: boolean
 }
 export interface OrchestrationProfileResult {
   name?: string | null
@@ -2032,6 +2033,8 @@ export interface OrchestrationProfileResult {
   profiles?: OrchestrationProfileRow[] | null
   active_profile?: string | null
   deleted?: string | null
+  confirm_required?: boolean | null
+  warning?: string | null
   [key: string]: unknown
 }
 export interface OrchestrationPolicyParams {

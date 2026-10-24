@@ -96,6 +96,14 @@ async function mount(initial?: OrchestrationStatus) {
       return { role: params.role, mode: params.mode,
                model_id: params.model_id, fallback_ids: params.fallback_ids }
     }
+    if (method === 'orchestration.profile') {
+      if (params.action === 'activate' && !params.confirm_cloud) {
+        return { confirm_required: true,
+                 warning: 'Remote profile can incur provider charges.' }
+      }
+      status = { ...status, active_profile: String(params.name ?? 'default') }
+      return { active_profile: status.active_profile }
+    }
     throw new Error(`unexpected method ${method}`)
   })
   const element = React.createElement(OrchestrationOverlay, {
@@ -142,6 +150,30 @@ async function mount(initial?: OrchestrationStatus) {
 }
 
 describe('/orchestrate interactive policy and local qualification', () => {
+  it('requires server-backed confirmation before activating a potentially billable profile', async () => {
+    const ui = await mount({
+      ...initialStatus(),
+      profiles: [{ name: 'default' }, { name: 'cloud-profile' }]
+    })
+    await ui.press('', { tab: true }) // models
+    await ui.press('', { tab: true }) // profiles
+    await ui.press('', { downArrow: true })
+    await ui.press('', { return: true })
+    expect(ui.request).toHaveBeenCalledWith('orchestration.profile', {
+      action: 'activate', name: 'cloud-profile', session_id: 'sess'
+    })
+    expect(ui.output()).toContain('Confirm profile change with possible cloud charges?')
+    expect(ui.request.mock.calls.some(([method, params]) =>
+      method === 'orchestration.profile' && params.confirm_cloud === true)).toBe(false)
+    await ui.press('n')
+    expect(ui.request.mock.calls.some(([method, params]) =>
+      method === 'orchestration.profile' && params.confirm_cloud === true)).toBe(false)
+    await ui.press('', { return: true })
+    await ui.press('y')
+    expect(ui.request).toHaveBeenCalledWith('orchestration.profile', {
+      action: 'activate', name: 'cloud-profile', session_id: 'sess', confirm_cloud: true
+    })
+  })
   it('requires an explicit y before saving a potentially billable proxy assignment', async () => {
     const ui = await mount({ ...initialStatus(), policy: { local_only: false } })
     await ui.press('', { tab: true }) // models
