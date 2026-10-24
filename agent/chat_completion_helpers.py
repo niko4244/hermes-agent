@@ -765,6 +765,7 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     so callers can register it with their abort/close machinery; bedrock / MoA
     manage their own clients. Interrupt/abort/close semantics stay in callers.
     """
+    _authorize_gateway_universal_request(agent)
     if agent.api_mode == "codex_responses":
         return agent._run_codex_stream(api_kwargs, client=make_client("codex_stream_request"),
             on_first_delta=getattr(agent, "_codex_on_first_delta", None))
@@ -772,6 +773,7 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
         # Request-local client so the stale/interrupt watchdog aborts sockets
         # from the stranger thread while the worker owns the SDK close (#67142).
         request_client = make_client("anthropic_messages_request", kind="anthropic_messages")
+        _authorize_gateway_universal_request(agent)
         return agent._anthropic_messages_create(api_kwargs, client=request_client)
     if agent.api_mode == "bedrock_converse":
         return _bedrock_converse_call(api_kwargs, stream=False)
@@ -790,6 +792,7 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     # request transform. No-op unless this really is the OpenAI SDK, so the
     # MoA facade above and the suite's stand-in clients are unaffected.
     api_kwargs = bypass_chat_sdk_request_transform(api_kwargs, request_client)
+    _authorize_gateway_universal_request(agent)
     return _chat_completion_capturing_headers(agent, request_client, api_kwargs)
 
 
@@ -2091,6 +2094,27 @@ def _revalidate_gateway_universal_fallbacks(agent) -> None:
         agent._unavailable_fallback_keys = set()
 
 
+def _authorize_gateway_universal_request(agent) -> None:
+    """Recheck the live saved role after fallback binding, just before provider I/O.
+
+    A profile can change after ``try_activate_fallback`` authorized its cached
+    chain, or after a successful fallback remains active for another API call.
+    This is deliberately limited to the same ContextVar-bound gateway main
+    agent with a saved universal role; legacy, CLI and delegated agents are not
+    given a new authorization regime.
+    """
+    gateway = sys.modules.get("tui_gateway.server")
+    scope = getattr(gateway, "_current_runtime_session_record", None)
+    session = scope.get() if scope is not None else None
+    if not isinstance(session, dict) or session.get("agent") is not agent:
+        return
+    override = session.get("model_override")
+    if not isinstance(override, dict) or override.get("_universal_selection") is not True:
+        return
+    from tui_gateway.universal_model_runtime import enforce_main_turn_policy
+    enforce_main_turn_policy(agent, session)
+
+
 def try_activate_fallback(agent, reason: FailoverReason | None = None, reset_at=None) -> bool:
     """Switch to the next fallback model/provider in the chain; False when exhausted. Swaps client,
     model slug and provider in place so the retry loop continues on the new backend; client
@@ -2609,6 +2633,7 @@ class _BedrockStream:
         return _on
 
     def _open_stream(self, next_api_kwargs: dict[str, Any]):
+        _authorize_gateway_universal_request(self.agent)
         return _bedrock_converse_call(dict(next_api_kwargs), stream=True, on_stream_denied=self._fall_back_to_converse)
 
     def _fall_back_to_converse(self, client, final_kwargs: dict, exc: Exception):
@@ -2985,6 +3010,7 @@ class _StreamingCall(StreamingWaitMonitor):
     def _open_chat_stream(self, stream_kwargs: dict[str, Any]):
         # Native Gemini rejects OpenAI's usage-streaming extension; so do strict endpoints that
         # already 4xx'd on it this session (``_stream_options_unsupported``, see #9705).
+        _authorize_gateway_universal_request(self.agent)
         if not is_native_gemini_base_url(self.agent.base_url) and not getattr(self.agent, "_stream_options_unsupported", False):
             stream_kwargs["stream_options"] = {"include_usage": True}
         request_client = self._attempt_request_client = self.clients.set_client(
@@ -2994,6 +3020,7 @@ class _StreamingCall(StreamingWaitMonitor):
         # #93650: as above — the streaming path carries the same bulk
         # messages/tools payload and pays the same client-side walk.
         stream_kwargs = bypass_chat_sdk_request_transform(stream_kwargs, request_client)
+        _authorize_gateway_universal_request(self.agent)
         return request_client.chat.completions.create(**stream_kwargs)
 
     def _chat_stream_created(self, raw_stream: Any) -> None:
@@ -3439,8 +3466,10 @@ class _StreamingCall(StreamingWaitMonitor):
         accumulator = relay_llm.AnthropicStreamAccumulator()
 
         def _open_anthropic_stream(next_api_kwargs: dict[str, Any]):
+            _authorize_gateway_universal_request(self.agent)
             final_kwargs = dict(next_api_kwargs)
             sanitize_anthropic_kwargs(final_kwargs, log_prefix=getattr(self.agent, "log_prefix", ""))
+            _authorize_gateway_universal_request(self.agent)
             manager = request_client.messages.stream(**final_kwargs)
             _stream_context["manager"] = manager
             return normalize_stream_usage(manager.__enter__())
