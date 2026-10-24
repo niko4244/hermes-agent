@@ -2051,6 +2051,46 @@ def _buffer_fallback_notice(agent, notice: str) -> None:
         agent._pending_fallback_notice = [str(pending), notice] if pending else [notice]
 
 
+def _revalidate_gateway_universal_fallbacks(agent) -> None:
+    """Revoke stale universal fallback hops after a profile edit mid-inference.
+
+    A gateway prompt authorizes its main route at turn start, but the profile can
+    change while a primary request is in flight. Only its *same* ContextVar-bound
+    main agent participates: CLI, legacy gateway sessions and delegated children
+    keep their existing failover semantics.
+    """
+    gateway = sys.modules.get("tui_gateway.server")
+    context = getattr(gateway, "_current_runtime_session_record", None)
+    session = context.get() if context is not None else None
+    if not isinstance(session, dict) or session.get("agent") is not agent:
+        return
+    override = session.get("model_override")
+    if not isinstance(override, dict) or override.get("_universal_selection") is not True:
+        return
+
+    from tui_gateway.universal_model_runtime import (
+        enforce_main_turn_policy, selected_profile_main_fallbacks,
+    )
+
+    # Recheck the CURRENT active role, local-only and verified price ceilings;
+    # invalidated pin/profile/registry failures abort before provider binding.
+    enforce_main_turn_policy(agent, session)
+    approved = selected_profile_main_fallbacks()
+    if approved is None:
+        raise ValueError("Saved main role no longer authorizes provider fallback")
+
+    # Even unrestricted profiles may revoke a specific fallback ID. Preserve
+    # the original ordering and consumed positions; newly added entries are
+    # not silently granted to a turn already underway.
+    chain = list(getattr(agent, "_fallback_chain", None) or [])
+    consumed = max(0, int(getattr(agent, "_fallback_index", 0) or 0))
+    retained = [entry for entry in chain if entry in approved]
+    if retained != chain:
+        agent._fallback_chain = retained
+        agent._fallback_index = sum(entry in approved for entry in chain[:consumed])
+        agent._unavailable_fallback_keys = set()
+
+
 def try_activate_fallback(agent, reason: FailoverReason | None = None, reset_at=None) -> bool:
     """Switch to the next fallback model/provider in the chain; False when exhausted. Swaps client,
     model slug and provider in place so the retry loop continues on the new backend; client
@@ -2059,6 +2099,7 @@ def try_activate_fallback(agent, reason: FailoverReason | None = None, reset_at=
     if switch_deferred_by_reset(agent, reason, reset_at):
         return False
     cooldown_seconds = _arm_rate_limit_cooldown(agent, reason, reset_at=reset_at)
+    _revalidate_gateway_universal_fallbacks(agent)
     while True:
         if agent._fallback_index >= len(agent._fallback_chain):
             return _fallback_chain_exhausted(agent, reason)
