@@ -195,8 +195,35 @@ class ModelService:
         parsed = _parse_profile(json.loads(row[0]))
         return {"name": selected, **parsed}
 
+    def _known_historical_native_ids(self) -> set[str]:
+        """Classify expired *native* Ollama identities without reviving them.
+
+        Historical listings are never merged into executable inventory here.
+        `resolve()` independently validates any expired native pin before use.
+        OpenAI-compatible localhost proxies are not native Ollama evidence.
+        """
+        from .qualification import _valid_origin
+
+        with self._connect() as conn:
+            records = conn.execute("SELECT payload FROM observations WHERE name IN "
+                                   "('local-models','local-models-history')").fetchall()
+        known = set()
+        for (payload,) in records:
+            try:
+                entries = json.loads(payload)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(entries, list):
+                continue
+            for entry in entries[:2000]:
+                if (isinstance(entry, dict) and entry.get("source") == "ollama-live"
+                        and isinstance(entry.get("id"), str) and _valid_origin(entry) is not None):
+                    known.add(entry["id"])
+        return known
+
     @staticmethod
-    def _chargeable_profile_routes(profile: dict, models: dict[str, dict]) -> set[tuple[str, str]]:
+    def _chargeable_profile_routes(profile: dict, models: dict[str, dict],
+                                   native_history: set[str]) -> set[tuple[str, str]]:
         """Potentially billable routes, including explicit auto picks and fallbacks.
 
         Offline/unknown IDs are treated as remotely billable until proven
@@ -219,7 +246,7 @@ class ModelService:
                         "max_input_cost_per_million", "max_output_cost_per_million"
                     )) and not ModelService._allowed(model, policy, frozenset(), None):
                         continue
-                elif any(key in policy for key in (
+                elif model_id in native_history or any(key in policy for key in (
                     "max_input_cost_per_million", "max_output_cost_per_million"
                 )):
                     continue
@@ -227,11 +254,12 @@ class ModelService:
         return routes
 
     def _check_cloud_consent(self, active: dict, candidate: dict, *,
-                             confirm_cloud: bool, models: dict[str, dict]) -> None:
+                             confirm_cloud: bool, models: dict[str, dict],
+                             native_history: set[str]) -> None:
         if confirm_cloud:
             return
-        prior = self._chargeable_profile_routes(active, models)
-        proposed = self._chargeable_profile_routes(candidate, models)
+        prior = self._chargeable_profile_routes(active, models, native_history)
+        proposed = self._chargeable_profile_routes(candidate, models, native_history)
         if proposed - prior:
             raise CloudConsentRequired("remote or proxied profile routes require explicit cloud confirmation")
 
@@ -239,6 +267,7 @@ class ModelService:
         selected = _require_identifier(name, _PROFILE_RE, "profile name")
         validated = _parse_profile(payload)
         models = {row["id"]: row for row in self._inventory()}
+        native_history = self._known_historical_native_ids()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             active_name = conn.execute("SELECT value FROM metadata WHERE key='active_profile'").fetchone()[0]
@@ -246,7 +275,8 @@ class ModelService:
             if active_row is None:
                 raise ValueError("active routing profile is unavailable")
             self._check_cloud_consent(_parse_profile(json.loads(active_row[0])), validated,
-                                      confirm_cloud=confirm_cloud, models=models)
+                                      confirm_cloud=confirm_cloud, models=models,
+                                      native_history=native_history)
             conn.execute(
                 "INSERT INTO profiles(name,payload) VALUES (?,?) ON CONFLICT(name) DO UPDATE SET payload=excluded.payload",
                 (selected, json.dumps(validated, sort_keys=True, separators=(",", ":"))),
@@ -465,6 +495,7 @@ class ModelService:
         if action == "activate":
             selected = _require_identifier(name, _PROFILE_RE, "profile name")
             models = {row["id"]: row for row in self._inventory()}
+            native_history = self._known_historical_native_ids()
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 target_row = conn.execute("SELECT payload FROM profiles WHERE name=?", (selected,)).fetchone()
@@ -476,7 +507,8 @@ class ModelService:
                     raise ValueError("active routing profile is unavailable")
                 self._check_cloud_consent(_parse_profile(json.loads(active_row[0])),
                                           _parse_profile(json.loads(target_row[0])),
-                                          confirm_cloud=confirm_cloud, models=models)
+                                          confirm_cloud=confirm_cloud, models=models,
+                                          native_history=native_history)
                 conn.execute("UPDATE metadata SET value=? WHERE key='active_profile'", (selected,))
             return self._load(selected)
         if action == "delete":

@@ -98,6 +98,24 @@ def test_explicit_auto_remote_and_unknown_remote_ids_require_confirmation(tmp_pa
             svc.profile("save", "default", profile)
 
 
+def test_expired_native_ollama_history_is_local_but_expired_proxy_still_needs_consent(tmp_path):
+    from hermes_cli.universal_models.discovery import _row
+
+    svc = _svc(tmp_path)
+    native = _row("custom", "native", "ollama-live", "reachable",
+                  endpoint="http://127.0.0.1:11434/v1")
+    proxy = _row("custom", "proxy", "openai-compatible-live", "reachable",
+                 endpoint="http://127.0.0.1:1234/v1")
+    with sqlite3.connect(svc.db_path) as conn:
+        conn.execute("INSERT INTO observations(name,payload,measured_at) VALUES (?,?,?)",
+                     ("local-models", json.dumps([native, proxy]), 1.0))
+    svc.profile("save", "native", _profile(native["id"]))
+    assert svc.resolve("main") is None  # never revives expired listings
+    with pytest.raises(CloudConsentRequired):
+        svc.profile("save", "proxy", _profile(proxy["id"]))
+    assert {r["name"] for r in svc.profile("list")["profiles"]} == {"default", "native"}
+
+
 def test_confirmation_flag_must_be_boolean_and_invalid_value_never_writes(tmp_path):
     svc = _svc(tmp_path)
     with pytest.raises(ValueError, match="confirm_cloud"):
